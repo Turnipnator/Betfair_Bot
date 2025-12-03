@@ -214,49 +214,61 @@ class BetfairClient:
         if not self.is_logged_in or not market_ids:
             return {}
 
+        # Batch size to avoid TOO_MUCH_DATA error from Betfair
+        BATCH_SIZE = 10
+
         try:
             loop = asyncio.get_event_loop()
+            all_books = []
+            all_catalogues = []
 
-            # Fetch market books (prices)
-            books = await loop.run_in_executor(
-                None,
-                lambda: self._client.betting.list_market_book(
-                    market_ids=market_ids,
-                    price_projection={
-                        "priceData": ["EX_BEST_OFFERS", "EX_TRADED"],
-                        "virtualise": True,
-                    },
-                ),
-            )
+            # Process in batches
+            for i in range(0, len(market_ids), BATCH_SIZE):
+                batch_ids = market_ids[i:i + BATCH_SIZE]
 
-            # Also get catalogue for metadata
-            mf = market_filter(market_ids=market_ids)
-            catalogues = await loop.run_in_executor(
-                None,
-                lambda: self._client.betting.list_market_catalogue(
-                    filter=mf,
-                    market_projection=[
-                        "COMPETITION",
-                        "EVENT",
-                        "EVENT_TYPE",
-                        "MARKET_START_TIME",
-                        "RUNNER_DESCRIPTION",
-                    ],
-                    max_results=len(market_ids),
-                ),
-            )
+                # Fetch market books (prices) for this batch
+                books = await loop.run_in_executor(
+                    None,
+                    lambda ids=batch_ids: self._client.betting.list_market_book(
+                        market_ids=ids,
+                        price_projection={
+                            "priceData": ["EX_BEST_OFFERS", "EX_TRADED"],
+                            "virtualise": True,
+                        },
+                    ),
+                )
+                all_books.extend(books)
+
+                # Also get catalogue for metadata
+                mf = market_filter(market_ids=batch_ids)
+                catalogues = await loop.run_in_executor(
+                    None,
+                    lambda f=mf, n=len(batch_ids): self._client.betting.list_market_catalogue(
+                        filter=f,
+                        market_projection=[
+                            "COMPETITION",
+                            "EVENT",
+                            "EVENT_TYPE",
+                            "MARKET_START_TIME",
+                            "RUNNER_DESCRIPTION",
+                        ],
+                        max_results=n,
+                    ),
+                )
+                all_catalogues.extend(catalogues)
 
             # Index catalogues by market ID
-            cat_by_id = {cat.market_id: cat for cat in catalogues}
+            cat_by_id = {cat.market_id: cat for cat in all_catalogues}
 
             result = {}
-            for book in books:
+            for book in all_books:
                 cat = cat_by_id.get(book.market_id)
                 if cat:
                     market = self._book_to_market(book, cat)
                     if market:
                         result[market.market_id] = market
 
+            logger.info("Fetched market prices", count=len(result))
             return result
 
         except APIError as e:

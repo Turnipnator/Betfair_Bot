@@ -23,7 +23,7 @@ from apscheduler.triggers.cron import CronTrigger
 from config import settings
 from config.logging_config import setup_logging, get_logger
 from src.betfair import betfair_client
-from src.database import db, BankrollRepository, BetRepository, PerformanceRepository
+from src.database import db, BankrollRepository, BetRepository, MarketRepository, PerformanceRepository
 from src.models import Bet, BetSignal, BetStatus, MarketFilter, Sport
 from src.paper_trading import PaperTradingSimulator
 from src.risk import risk_manager
@@ -321,7 +321,7 @@ class PaperTradingEngine:
             logger.error("Error scanning markets", error=str(e))
 
     async def manage_positions(self) -> None:
-        """Manage open positions (for in-play strategies)."""
+        """Manage open positions (for in-play strategies) and settle closed markets."""
         if not self._running or risk_manager.is_stopped:
             return
 
@@ -342,13 +342,19 @@ class PaperTradingEngine:
             else:
                 markets = {}
 
-            # Check each open bet with its strategy
+            # Check each open bet
             for bet in open_bets:
                 market = markets.get(bet.market_id)
                 if not market:
                     continue
 
-                # Find the strategy that placed this bet
+                # Check if market has settled (CLOSED status means result available)
+                from src.models import MarketStatus
+                if market.status == MarketStatus.CLOSED:
+                    await self._settle_bet_from_market(bet, market)
+                    continue
+
+                # Find the strategy that placed this bet for position management
                 for strategy in self._strategies:
                     if strategy.name == bet.strategy:
                         exit_signal = strategy.manage_position(market, bet)
@@ -358,6 +364,63 @@ class PaperTradingEngine:
 
         except Exception as e:
             logger.error("Error managing positions", error=str(e))
+
+    async def _settle_bet_from_market(self, bet: Bet, market) -> None:
+        """Settle a bet based on market result."""
+        try:
+            # Find the runner we bet on
+            runner = None
+            for r in market.runners:
+                if r.selection_id == bet.selection_id:
+                    runner = r
+                    break
+
+            if not runner:
+                logger.warning("Runner not found for settlement", bet_id=bet.bet_ref)
+                return
+
+            # Determine if selection won based on runner status
+            # WINNER, LOSER, REMOVED (void), PLACED (for place markets)
+            selection_won = runner.status == "WINNER"
+
+            # If runner was removed (non-runner), void the bet
+            if runner.status == "REMOVED":
+                self._simulator.void_bet(bet.id)
+                logger.info("Bet voided (non-runner)", bet_id=bet.bet_ref)
+                await notifier.bet_settled(bet)
+                return
+
+            # Settle the bet
+            success, pnl = self._simulator.settle_bet(bet.id, selection_won)
+
+            if success:
+                # Notify
+                await notifier.bet_settled(bet)
+
+                # Update database
+                try:
+                    async with db.session() as session:
+                        bet_repo = BetRepository(session)
+                        if bet.id:
+                            await bet_repo.settle(
+                                bet.id,
+                                bet.result,
+                                bet.profit_loss,
+                                bet.commission,
+                            )
+                            await session.commit()
+                except Exception as db_error:
+                    logger.warning("Failed to update settlement in database", error=str(db_error)[:100])
+
+                logger.info(
+                    "Bet settled",
+                    bet_id=bet.bet_ref,
+                    result=bet.result.value if bet.result else "UNKNOWN",
+                    pnl=f"£{pnl:+.2f}",
+                )
+
+        except Exception as e:
+            logger.error("Error settling bet", bet_id=bet.bet_ref, error=str(e))
 
     async def process_signal(self, signal: BetSignal) -> None:
         """Process a betting signal."""
@@ -388,9 +451,30 @@ class PaperTradingEngine:
                 # Try to save to database (non-fatal if fails)
                 try:
                     async with db.session() as session:
+                        # First ensure market exists in DB (to satisfy foreign key)
+                        market_repo = MarketRepository(session)
+                        existing_market = await market_repo.get(signal.market_id)
+                        if not existing_market:
+                            # Create minimal market record from signal data
+                            from src.models import Market, MarketStatus
+                            from datetime import datetime
+                            minimal_market = Market(
+                                market_id=signal.market_id,
+                                market_name=signal.market_name or "Unknown",
+                                event_name=signal.event_name or "Unknown",
+                                sport=signal.sport,
+                                market_type="WIN" if signal.sport and signal.sport.value == "horse_racing" else "MATCH_ODDS",
+                                start_time=datetime.utcnow(),  # Approximate
+                                status=MarketStatus.OPEN,
+                            )
+                            await market_repo.save(minimal_market)
+
+                        # Now save the bet
                         bet_repo = BetRepository(session)
                         bet_id = await bet_repo.save(bet)
                         bet.id = bet_id
+                        await session.commit()
+                        logger.info("Bet saved to database", bet_id=bet.bet_ref, db_id=bet_id)
                 except Exception as db_error:
                     logger.warning(
                         "Failed to save bet to database (bet still active in memory)",

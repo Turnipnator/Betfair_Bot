@@ -269,6 +269,10 @@ class PaperTradingSimulator:
             if bet.status != BetStatus.SETTLED
         ]
 
+    def get_all_bets(self) -> list[Bet]:
+        """Get all bets (open and settled)."""
+        return list(self._bets.values())
+
     def get_bets_for_market(self, market_id: str) -> list[Bet]:
         """Get all bets for a specific market."""
         return [

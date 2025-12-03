@@ -102,7 +102,9 @@ class TradingBot:
 
         # Import handlers here to avoid circular imports
         from src.telegram_bot.handlers import (
+            handle_daily,
             handle_help,
+            handle_monthly,
             handle_performance,
             handle_positions,
             handle_report,
@@ -112,6 +114,7 @@ class TradingBot:
             handle_stop,
             handle_toggle,
             handle_unknown,
+            handle_weekly,
         )
 
         # Core commands
@@ -128,6 +131,9 @@ class TradingBot:
         self._app.add_handler(CommandHandler("positions", handle_positions))
         self._app.add_handler(CommandHandler("performance", handle_performance))
         self._app.add_handler(CommandHandler("report", handle_report))
+        self._app.add_handler(CommandHandler("daily", handle_daily))
+        self._app.add_handler(CommandHandler("weekly", handle_weekly))
+        self._app.add_handler(CommandHandler("monthly", handle_monthly))
 
         # Unknown commands
         self._app.add_handler(

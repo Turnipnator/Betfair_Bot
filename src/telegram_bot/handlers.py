@@ -64,7 +64,10 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 /toggle &lt;strategy&gt; - Enable/disable a strategy
 
 <b>Reports</b>
-/report - Generate weekly report
+/daily - Today's performance
+/weekly - Last 7 days performance
+/monthly - Last 30 days performance
+/report - Same as /weekly
 
 <b>Other</b>
 /help - Show this message
@@ -328,15 +331,105 @@ async def handle_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await _unauthorized(update)
         return
 
-    await update.message.reply_text(
-        "Generating weekly report...\n"
-        "This feature will be available once there's enough data."
-    )
+    # Default to weekly
+    await _generate_report(update, days=7, title="Weekly")
 
-    # TODO: Integrate with reporting module when built
-    # from src.reporting.weekly import generate_weekly_report
-    # report = await generate_weekly_report()
-    # await update.message.reply_text(report, parse_mode="HTML")
+
+async def handle_daily(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /daily command - today's performance."""
+    if not _is_authorized(update):
+        await _unauthorized(update)
+        return
+
+    await _generate_report(update, days=1, title="Daily")
+
+
+async def handle_weekly(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /weekly command - last 7 days performance."""
+    if not _is_authorized(update):
+        await _unauthorized(update)
+        return
+
+    await _generate_report(update, days=7, title="Weekly")
+
+
+async def handle_monthly(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /monthly command - last 30 days performance."""
+    if not _is_authorized(update):
+        await _unauthorized(update)
+        return
+
+    await _generate_report(update, days=30, title="Monthly")
+
+
+async def _generate_report(update: Update, days: int, title: str) -> None:
+    """Generate performance report for given period."""
+    try:
+        from src.telegram_bot.bot import telegram_bot
+
+        # Try simulator first (most accurate for current session)
+        if telegram_bot._simulator:
+            sim = telegram_bot._simulator
+            bets = sim.get_all_bets()
+            settled = [b for b in bets if b.status.value == "SETTLED"]
+            open_bets = [b for b in bets if b.status.value != "SETTLED"]
+
+            total_bets = len(bets)
+            wins = len([b for b in settled if b.result and b.result.value == "WON"])
+            losses = len([b for b in settled if b.result and b.result.value == "LOST"])
+            win_rate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
+
+            total_pnl = sum(b.profit_loss or 0 for b in settled)
+            total_staked = sum(b.stake for b in settled)
+            roi = (total_pnl / total_staked * 100) if total_staked > 0 else 0
+
+            # Group by strategy
+            by_strategy = {}
+            for bet in bets:
+                if bet.strategy not in by_strategy:
+                    by_strategy[bet.strategy] = {
+                        "bets": 0, "wins": 0, "losses": 0, "pnl": 0.0, "staked": 0.0
+                    }
+                by_strategy[bet.strategy]["bets"] += 1
+                if bet.status.value == "SETTLED":
+                    by_strategy[bet.strategy]["staked"] += bet.stake
+                    by_strategy[bet.strategy]["pnl"] += bet.profit_loss or 0
+                    if bet.result and bet.result.value == "WON":
+                        by_strategy[bet.strategy]["wins"] += 1
+                    elif bet.result and bet.result.value == "LOST":
+                        by_strategy[bet.strategy]["losses"] += 1
+
+            text = f"<b>{title} Report</b>\n\n"
+            text += f"<b>Bankroll:</b> £{sim.bankroll:.2f}\n"
+            text += f"<b>Starting:</b> £{sim._starting_bankroll:.2f}\n"
+            text += f"<b>Change:</b> £{sim.bankroll - sim._starting_bankroll:+.2f}\n\n"
+
+            text += f"<b>Overall</b>\n"
+            text += f"Total bets: {total_bets}\n"
+            text += f"Settled: {len(settled)} | Open: {len(open_bets)}\n"
+            text += f"Wins: {wins} | Losses: {losses}\n"
+            text += f"Win rate: {win_rate:.1f}%\n"
+            text += f"P&L: £{total_pnl:+.2f}\n"
+            text += f"ROI: {roi:+.1f}%\n\n"
+
+            if by_strategy:
+                text += "<b>By Strategy</b>\n"
+                for strat, data in by_strategy.items():
+                    strat_roi = (data["pnl"] / data["staked"] * 100) if data["staked"] > 0 else 0
+                    text += f"\n<b>{strat}</b>\n"
+                    text += f"  Bets: {data['bets']} | W/L: {data['wins']}/{data['losses']}\n"
+                    text += f"  P&L: £{data['pnl']:+.2f} | ROI: {strat_roi:+.1f}%\n"
+
+            await update.message.reply_text(text, parse_mode="HTML")
+        else:
+            await update.message.reply_text(
+                "No trading data available yet.\n"
+                "Start paper trading to collect data."
+            )
+
+    except Exception as e:
+        logger.error(f"Error generating {title} report", error=str(e))
+        await update.message.reply_text(f"Error generating report: {str(e)[:100]}")
 
 
 async def handle_unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

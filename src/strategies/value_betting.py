@@ -8,9 +8,12 @@ Works for both horse racing and football.
 from typing import Optional
 
 from config import settings
+from config.logging_config import get_logger
 from src.models import Bet, BetSignal, BetType, Market, Runner, Sport
 from src.strategies.base import BaseStrategy
 from src.utils import calculate_edge, calculate_stake, decimal_to_implied_prob
+
+logger = get_logger(__name__)
 
 
 class ValueBettingStrategy(BaseStrategy):
@@ -73,8 +76,18 @@ class ValueBettingStrategy(BaseStrategy):
         Returns:
             BetSignal for best value opportunity, or None
         """
+        # Clear and regenerate model probabilities for each market
+        self._model_probabilities = {}
+        self._generate_model_probabilities(market)
+
         if not self.pre_evaluate(market):
             return None
+
+        logger.debug(
+            "Evaluating market for value",
+            market=market.market_name,
+            runners=len(market.runners),
+        )
 
         # Find best value opportunity
         best_signal: Optional[BetSignal] = None
@@ -88,9 +101,53 @@ class ValueBettingStrategy(BaseStrategy):
                 best_signal = signal
 
         if best_signal:
+            logger.info(
+                "Value opportunity found",
+                selection=best_signal.selection_name,
+                odds=best_signal.odds,
+                edge=f"{best_signal.edge:.1%}",
+                market=market.market_name,
+            )
             self.log_signal(best_signal)
 
         return best_signal
+
+    def _generate_model_probabilities(self, market: Market) -> None:
+        """
+        Generate model probabilities from market data.
+
+        Uses a simple approach: calculate "fair" probabilities by removing
+        the overround, then look for selections where back odds are higher
+        than expected (potential value).
+
+        For paper trading, we add some randomness to simulate model uncertainty
+        which will occasionally find "value" to test the betting flow.
+        """
+        import random
+
+        # Calculate implied probabilities from back prices
+        implied_probs = {}
+        total_implied = 0.0
+
+        for runner in market.runners:
+            if runner.status == "ACTIVE" and runner.best_back_price:
+                prob = decimal_to_implied_prob(runner.best_back_price)
+                implied_probs[runner.selection_id] = prob
+                total_implied += prob
+
+        if not implied_probs or total_implied == 0:
+            return
+
+        # Normalize to get "fair" probabilities (remove overround)
+        # Then add slight random adjustment to simulate model view
+        self._model_probabilities = {}
+        for selection_id, implied_prob in implied_probs.items():
+            fair_prob = implied_prob / total_implied
+            # Add random adjustment (-3% to +8%) to simulate model uncertainty
+            # This gives us occasional "value" opportunities for testing
+            adjustment = random.uniform(-0.03, 0.08)
+            model_prob = min(0.95, max(0.01, fair_prob + adjustment))
+            self._model_probabilities[selection_id] = model_prob
 
     def _evaluate_runner(
         self,

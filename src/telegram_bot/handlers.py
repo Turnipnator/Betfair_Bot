@@ -215,25 +215,38 @@ async def handle_positions(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     try:
-        async with db.session() as session:
-            bet_repo = BetRepository(session)
-            is_paper = settings.is_paper_mode()
-            open_bets = await bet_repo.get_open(is_paper)
+        from src.telegram_bot.bot import telegram_bot
 
-            if not open_bets:
-                await update.message.reply_text("No open positions.")
-                return
+        # First try to get from simulator (in-memory, more reliable for paper trading)
+        open_bets = []
+        if telegram_bot._simulator:
+            open_bets = telegram_bot._simulator.get_open_bets()
 
-            text = "<b>Open Positions</b>\n\n"
-            for bet in open_bets:
-                text += (
-                    f"<b>{bet.selection_name}</b>\n"
-                    f"  {bet.bet_type} @ {bet.matched_odds:.2f}\n"
-                    f"  Stake: £{bet.stake:.2f}\n"
-                    f"  Strategy: {bet.strategy}\n\n"
-                )
+        # Fall back to database if no simulator
+        if not open_bets:
+            async with db.session() as session:
+                bet_repo = BetRepository(session)
+                is_paper = settings.is_paper_mode()
+                open_bets = await bet_repo.get_open(is_paper)
 
-            await update.message.reply_text(text, parse_mode="HTML")
+        if not open_bets:
+            await update.message.reply_text("No open positions.")
+            return
+
+        text = "<b>Open Positions</b>\n\n"
+        total_stake = 0.0
+        for bet in open_bets:
+            bet_type = bet.bet_type.value if hasattr(bet.bet_type, 'value') else bet.bet_type
+            text += (
+                f"<b>{bet.selection_name}</b>\n"
+                f"  {bet_type} @ {bet.matched_odds:.2f}\n"
+                f"  Stake: £{bet.stake:.2f}\n"
+                f"  Strategy: {bet.strategy}\n\n"
+            )
+            total_stake += bet.stake
+
+        text += f"<b>Total: {len(open_bets)} positions, £{total_stake:.2f} at risk</b>"
+        await update.message.reply_text(text, parse_mode="HTML")
 
     except Exception as e:
         logger.error("Error handling /positions", error=str(e))

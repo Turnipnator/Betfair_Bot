@@ -99,6 +99,7 @@ class PaperTradingEngine:
             await telegram_bot.initialize()
             telegram_bot.on_emergency_stop(self.emergency_stop)
             telegram_bot.on_start_trading(self.start)
+            telegram_bot.set_simulator(self._simulator)  # For /positions command
             await telegram_bot.start()
         else:
             logger.warning("Telegram not configured - running without notifications")

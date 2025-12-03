@@ -38,6 +38,13 @@ class TradingBot:
         self._emergency_stop_callback: Optional[Callable] = None
         self._start_trading_callback: Optional[Callable] = None
 
+        # Reference to simulator for querying positions
+        self._simulator = None
+
+    def set_simulator(self, simulator) -> None:
+        """Set reference to paper trading simulator."""
+        self._simulator = simulator
+
     @property
     def is_running(self) -> bool:
         """Check if the bot is running."""

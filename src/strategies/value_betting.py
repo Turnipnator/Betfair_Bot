@@ -35,7 +35,7 @@ class ValueBettingStrategy(BaseStrategy):
         min_edge: Optional[float] = None,
         min_odds: float = 1.50,
         max_odds: float = 10.0,
-        min_volume: float = 1000.0,
+        min_volume: float = 100.0,  # Lowered from 1000 for paper trading
     ) -> None:
         """
         Initialize value betting strategy.
@@ -93,12 +93,28 @@ class ValueBettingStrategy(BaseStrategy):
         best_signal: Optional[BetSignal] = None
         best_edge = self.min_edge
 
+        # Track filter stats for debugging
+        runners_evaluated = 0
+        runners_passed_filters = 0
+
         for runner in market.runners:
+            runners_evaluated += 1
             signal = self._evaluate_runner(market, runner)
 
-            if signal and signal.edge and signal.edge > best_edge:
-                best_edge = signal.edge
-                best_signal = signal
+            if signal:
+                runners_passed_filters += 1
+                if signal.edge and signal.edge > best_edge:
+                    best_edge = signal.edge
+                    best_signal = signal
+
+        # Log evaluation summary
+        logger.info(
+            "Market evaluation complete",
+            market=market.market_name[:25],
+            runners=runners_evaluated,
+            passed_filters=runners_passed_filters,
+            found_value=best_signal is not None,
+        )
 
         if best_signal:
             logger.info(
@@ -136,16 +152,29 @@ class ValueBettingStrategy(BaseStrategy):
                 total_implied += prob
 
         if not implied_probs or total_implied == 0:
+            logger.info(
+                "No valid prices for probability calculation",
+                market=market.market_name,
+                runners_with_prices=len(implied_probs),
+            )
             return
+
+        overround = total_implied - 1.0
+        logger.info(
+            "Generating model probabilities",
+            market=market.market_name,
+            runners=len(implied_probs),
+            overround=f"{overround:.1%}",
+        )
 
         # Normalize to get "fair" probabilities (remove overround)
         # Then add slight random adjustment to simulate model view
         self._model_probabilities = {}
         for selection_id, implied_prob in implied_probs.items():
             fair_prob = implied_prob / total_implied
-            # Add random adjustment (-3% to +8%) to simulate model uncertainty
-            # This gives us occasional "value" opportunities for testing
-            adjustment = random.uniform(-0.03, 0.08)
+            # Add random adjustment (-2% to +12%) to simulate model uncertainty
+            # Higher range gives better chance of finding value for paper testing
+            adjustment = random.uniform(-0.02, 0.12)
             model_prob = min(0.95, max(0.01, fair_prob + adjustment))
             self._model_probabilities[selection_id] = model_prob
 
@@ -175,21 +204,50 @@ class ValueBettingStrategy(BaseStrategy):
 
         # Need back prices
         if not runner.best_back_price:
+            logger.debug(
+                "Runner filtered: no back price",
+                runner=runner.name[:20],
+            )
             return None
 
         odds = runner.best_back_price
 
         # Check odds range
         if odds < self.min_odds or odds > self.max_odds:
+            logger.debug(
+                "Runner filtered: odds out of range",
+                runner=runner.name[:20],
+                odds=f"{odds:.2f}",
+                range=f"{self.min_odds}-{self.max_odds}",
+            )
             return None
 
-        # Check volume
-        if runner.total_matched < self.min_volume:
+        # Check volume - relaxed for paper trading
+        # Use market total_matched as fallback if runner volume not available
+        effective_volume = runner.total_matched or market.total_matched / len(market.runners)
+        if effective_volume < self.min_volume:
+            logger.debug(
+                "Runner filtered: low volume",
+                runner=runner.name[:20],
+                volume=f"£{effective_volume:.0f}",
+                min_volume=f"£{self.min_volume:.0f}",
+            )
             return None
 
         # Calculate edge
         implied_prob = decimal_to_implied_prob(odds)
         edge = model_prob - implied_prob
+
+        # Log significant edges (within 3% of threshold or above)
+        if edge > self.min_edge - 0.03:
+            logger.info(
+                "Runner edge calculated",
+                runner=runner.name[:20],
+                odds=f"{odds:.2f}",
+                edge=f"{edge:.1%}",
+                min_edge=f"{self.min_edge:.1%}",
+                qualifies=edge >= self.min_edge,
+            )
 
         # Check minimum edge
         if edge < self.min_edge:

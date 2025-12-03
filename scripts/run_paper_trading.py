@@ -372,13 +372,7 @@ class PaperTradingEngine:
             success, message, bet = self._simulator.place_order(signal)
 
             if success and bet:
-                # Save to database
-                async with db.session() as session:
-                    bet_repo = BetRepository(session)
-                    bet_id = await bet_repo.save(bet)
-                    bet.id = bet_id
-
-                # Notify
+                # Send notification FIRST (before database which can fail)
                 await notifier.bet_placed(bet)
                 self._bets_today += 1
 
@@ -389,6 +383,19 @@ class PaperTradingEngine:
                     odds=signal.odds,
                     stake=bet.stake,
                 )
+
+                # Try to save to database (non-fatal if fails)
+                try:
+                    async with db.session() as session:
+                        bet_repo = BetRepository(session)
+                        bet_id = await bet_repo.save(bet)
+                        bet.id = bet_id
+                except Exception as db_error:
+                    logger.warning(
+                        "Failed to save bet to database (bet still active in memory)",
+                        bet_id=bet.bet_ref,
+                        error=str(db_error)[:100],
+                    )
 
                 # Record in strategy if needed (for LTD)
                 for strategy in self._strategies:

@@ -549,6 +549,9 @@ class PaperTradingEngine:
                     if bet.strategy in self._markets_with_bets:
                         self._markets_with_bets[bet.strategy].discard(bet.market_id)
 
+                    # Send notification
+                    await notifier.bet_settled(bet)
+
                     # Update database
                     try:
                         async with db.session() as session:

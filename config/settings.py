@@ -131,12 +131,12 @@ class StrategySettings(BaseSettings):
         description="Comma-separated list of enabled strategies",
     )
     value_min_edge: float = Field(
-        default=0.08,
+        default=0.10,
         alias="VALUE_MIN_EDGE",
-        description="Minimum edge for value betting (0.08 = 8%)",
+        description="Minimum edge for value betting (0.10 = 10%)",
     )
     value_max_odds: float = Field(
-        default=6.0,
+        default=3.5,  # Lowered from 6.0 - focus on more likely outcomes
         alias="VALUE_MAX_ODDS",
         description="Maximum odds to consider for value bets",
     )

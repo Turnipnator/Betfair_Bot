@@ -278,9 +278,8 @@ class ValueBettingStrategy(BaseStrategy):
             (len(market.runners) == 3 and any("draw" in r.name.lower() for r in market.runners))
         )
 
-    # Top leagues with reliable data - restrict value betting to these
-    TOP_LEAGUES = {"E0", "E1", "SP1", "D1", "I1", "F1", "P1", "N1"}  # Top European leagues
-    MIN_TEAM_GAMES = 5  # Minimum games for reliable statistics
+    # Minimum games required for reliable team statistics
+    MIN_TEAM_GAMES = 5
 
     async def _generate_football_poisson_probs(self, market: Market) -> None:
         """
@@ -315,15 +314,6 @@ class ValueBettingStrategy(BaseStrategy):
             return
 
         home_stats, away_stats, league_stats = match_stats
-
-        # Filter: Only bet on top leagues with reliable data
-        if league_stats.league_code not in self.TOP_LEAGUES:
-            logger.debug(
-                "Skipping non-top league",
-                league=league_stats.league_code,
-                market=market.market_name,
-            )
-            return
 
         # Filter: Teams must have minimum games for reliable statistics
         if home_stats.matches_played < self.MIN_TEAM_GAMES or away_stats.matches_played < self.MIN_TEAM_GAMES:

@@ -84,21 +84,52 @@ async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     try:
         from src.telegram_bot.bot import telegram_bot
 
-        async with db.session() as session:
-            bankroll_repo = BankrollRepository(session)
-            bet_repo = BetRepository(session)
-            perf_repo = PerformanceRepository(session)
+        is_paper = settings.is_paper_mode()
+        mode = "PAPER" if is_paper else "LIVE"
+        trading_status = "ACTIVE" if telegram_bot.trading_active else "STOPPED"
 
-            is_paper = settings.is_paper_mode()
-            balance = await bankroll_repo.get_balance(is_paper)
-            available = await bankroll_repo.get_available_balance(is_paper)
-            todays_pnl = await perf_repo.get_total_pnl_today(is_paper)
-            open_bets = await bet_repo.get_open(is_paper)
+        # Use simulator for live data (most accurate for paper trading)
+        if telegram_bot._simulator:
+            sim = telegram_bot._simulator
+            balance = sim.bankroll
+            available = sim.available_balance
+            reserved = sim._reserved
+            open_bets = sim.get_open_bets()
 
-            mode = "PAPER" if is_paper else "LIVE"
-            trading_status = "ACTIVE" if telegram_bot.trading_active else "STOPPED"
+            # Calculate today's P&L from settled bets
+            settled_bets = [b for b in sim.get_all_bets() if b.status.value == "SETTLED"]
+            todays_pnl = sum(b.profit_loss or 0 for b in settled_bets)
+            starting = sim._starting_bankroll
 
             status_text = f"""
+<b>Bot Status</b>
+
+<b>Mode:</b> {mode}
+<b>Trading:</b> {trading_status}
+
+<b>Bankroll</b>
+Balance: £{balance:.2f}
+Starting: £{starting:.2f}
+Available: £{available:.2f}
+Reserved: £{reserved:.2f}
+
+<b>Session</b>
+P&L: £{balance - starting:+.2f}
+Open positions: {len(open_bets)}
+"""
+        else:
+            # Fall back to database if no simulator
+            async with db.session() as session:
+                bankroll_repo = BankrollRepository(session)
+                bet_repo = BetRepository(session)
+                perf_repo = PerformanceRepository(session)
+
+                balance = await bankroll_repo.get_balance(is_paper)
+                available = await bankroll_repo.get_available_balance(is_paper)
+                todays_pnl = await perf_repo.get_total_pnl_today(is_paper)
+                open_bets = await bet_repo.get_open(is_paper)
+
+                status_text = f"""
 <b>Bot Status</b>
 
 <b>Mode:</b> {mode}
@@ -113,7 +144,8 @@ Reserved: £{balance - available:.2f}
 P&L: £{todays_pnl:+.2f}
 Open positions: {len(open_bets)}
 """
-            await update.message.reply_text(status_text, parse_mode="HTML")
+
+        await update.message.reply_text(status_text, parse_mode="HTML")
 
     except Exception as e:
         logger.error("Error handling /status", error=str(e))

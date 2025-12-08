@@ -15,9 +15,12 @@ from enum import Enum
 from typing import Optional
 
 from config import settings
+from config.logging_config import get_logger
 from src.models import Bet, BetSignal, BetType, Market, Runner, Sport
 from src.strategies.base import BaseStrategy
 from src.utils import calculate_hedge_stake, round_to_tick
+
+logger = get_logger(__name__)
 
 
 class LTDState(str, Enum):
@@ -85,8 +88,8 @@ class LayTheDrawStrategy(BaseStrategy):
     def __init__(
         self,
         min_draw_odds: float = 3.0,
-        max_draw_odds: float = 4.0,
-        min_market_volume: float = 10000.0,
+        max_draw_odds: float = 3.25,  # Narrowed from 4.0 to reduce liability on losses
+        min_market_volume: float = 0.0,  # Disabled for paper trading - no volume filter
         cut_loss_minute: int = 70,
         min_profit_percent: float = 0.5,
     ) -> None:
@@ -111,7 +114,7 @@ class LayTheDrawStrategy(BaseStrategy):
         # Track open positions by market
         self._positions: dict[str, LTDPosition] = {}
 
-    def evaluate(self, market: Market) -> Optional[BetSignal]:
+    async def evaluate(self, market: Market) -> Optional[BetSignal]:
         """
         Evaluate market for LTD entry opportunity.
 
@@ -121,6 +124,13 @@ class LayTheDrawStrategy(BaseStrategy):
         Returns:
             BetSignal to lay the draw, or None
         """
+        logger.info(
+            "LTD: Evaluating market",
+            market=market.event_name,
+            market_type=market.market_type,
+            in_play=market.in_play,
+        )
+
         if not self.pre_evaluate(market):
             return None
 
@@ -139,6 +149,11 @@ class LayTheDrawStrategy(BaseStrategy):
 
         # Check draw odds in range
         if not draw_runner.best_lay_price:
+            logger.info(
+                "LTD: No lay price",
+                market=market.event_name,
+                back_price=draw_runner.best_back_price,
+            )
             return None
 
         draw_odds = draw_runner.best_lay_price
@@ -148,7 +163,22 @@ class LayTheDrawStrategy(BaseStrategy):
 
         # Check volume
         if draw_runner.total_matched < self.min_market_volume:
+            logger.info(
+                "LTD: Volume too low",
+                market=market.event_name,
+                draw_odds=draw_odds,
+                volume=draw_runner.total_matched,
+                min_required=self.min_market_volume,
+            )
             return None
+
+        # Log when we pass all checks
+        logger.info(
+            "LTD: Evaluating opportunity",
+            market=market.event_name,
+            draw_odds=draw_odds,
+            volume=draw_runner.total_matched,
+        )
 
         # Additional filters could go here:
         # - Check it's not a cup final

@@ -24,7 +24,7 @@ from config import settings
 from config.logging_config import setup_logging, get_logger
 from src.betfair import betfair_client
 from src.database import db, BankrollRepository, BetRepository, MarketRepository, PerformanceRepository
-from src.models import Bet, BetSignal, BetStatus, MarketFilter, Sport
+from src.models import Bet, BetSignal, BetStatus, BetType, MarketFilter, Sport
 from src.paper_trading import PaperTradingSimulator
 from src.risk import risk_manager
 from src.strategies import (
@@ -58,6 +58,9 @@ class PaperTradingEngine:
         self._strategies: list = []
         self._simulator: Optional[PaperTradingSimulator] = None
 
+        # Track markets with open bets to prevent duplicates
+        self._markets_with_bets: dict[str, set[str]] = {}  # strategy -> set of market_ids
+
         # Daily stats
         self._markets_scanned = 0
         self._bets_today = 0
@@ -76,20 +79,64 @@ class PaperTradingEngine:
         # Initialize database
         await db.initialize()
 
-        # Initialize bankroll
+        # Calculate bankroll from database: starting + sum of all settled P&L
         async with db.session() as session:
-            repo = BankrollRepository(session)
-            current = await repo.get_balance(is_paper=True)
-            if current == 0:
-                await repo.initialize(settings.paper_bankroll, is_paper=True)
-                logger.info(
-                    "Initialized paper bankroll",
-                    amount=settings.paper_bankroll,
-                )
-                current = settings.paper_bankroll
+            bet_repo = BetRepository(session)
 
-            # Initialize simulator
+            # Get total P&L from all settled paper bets
+            total_pnl = await bet_repo.get_total_pnl(is_paper=True)
+
+            # Calculate current bankroll
+            current = settings.paper_bankroll + total_pnl
+
+            logger.info(
+                "Calculated bankroll from database",
+                starting=settings.paper_bankroll,
+                total_pnl=total_pnl,
+                current=current,
+            )
+
+            # Initialize simulator with correct bankroll
             self._simulator = PaperTradingSimulator(current)
+
+            # Load open bets from database (from previous runs)
+            bet_repo = BetRepository(session)
+            open_bet_records = await bet_repo.get_open()
+            if open_bet_records:
+                # Convert BetRecord to Bet objects
+                open_bets = []
+                for rec in open_bet_records:
+                    bet = Bet(
+                        id=rec.id,
+                        bet_ref=rec.bet_ref,
+                        market_id=rec.market_id,
+                        selection_id=rec.selection_id,
+                        selection_name=rec.selection_name,
+                        strategy=rec.strategy,
+                        bet_type=BetType(rec.bet_type),
+                        requested_odds=rec.requested_odds,
+                        matched_odds=rec.matched_odds,
+                        stake=rec.stake,
+                        potential_profit=rec.potential_profit,
+                        potential_loss=rec.potential_loss,
+                        status=BetStatus(rec.status),
+                        is_paper=rec.is_paper,
+                        placed_at=rec.placed_at,
+                        matched_at=rec.matched_at,
+                    )
+                    open_bets.append(bet)
+
+                    # Track which markets already have bets by strategy
+                    if rec.strategy not in self._markets_with_bets:
+                        self._markets_with_bets[rec.strategy] = set()
+                    self._markets_with_bets[rec.strategy].add(rec.market_id)
+
+                self._simulator.load_bets_from_list(open_bets)
+                logger.info(
+                    "Loaded open bets from database",
+                    count=len(open_bets),
+                    markets_tracked=sum(len(v) for v in self._markets_with_bets.values()),
+                )
 
             # Initialize risk manager
             risk_manager.reset_daily_tracking(current)
@@ -187,6 +234,14 @@ class PaperTradingEngine:
             replace_existing=True,
         )
 
+        # Schedule stale bet settlement (for bets that can't get market data)
+        self._scheduler.add_job(
+            self.settle_stale_bets,
+            IntervalTrigger(minutes=30),
+            id="stale_settlement",
+            replace_existing=True,
+        )
+
         # Schedule keep-alive for Betfair session
         if betfair_client.is_logged_in:
             self._scheduler.add_job(
@@ -221,6 +276,9 @@ class PaperTradingEngine:
         )
 
         self._scheduler.start()
+
+        # Immediately settle any stale bets from previous runs
+        await self.settle_stale_bets()
 
         # Send startup notification
         if settings.telegram.is_configured():
@@ -278,13 +336,25 @@ class PaperTradingEngine:
                 await self.daily_reset()
 
             # Build filter
+            # Include major European leagues for football
             market_filter = MarketFilter(
                 sports=[Sport.HORSE_RACING, Sport.FOOTBALL],
                 market_types=["WIN", "MATCH_ODDS"],
-                countries=["GB", "IE"],
+                countries=[
+                    "GB", "IE",  # UK & Ireland
+                    "ES",  # Spain (La Liga)
+                    "DE",  # Germany (Bundesliga)
+                    "IT",  # Italy (Serie A)
+                    "FR",  # France (Ligue 1)
+                    "PT",  # Portugal (Primeira Liga)
+                    "NL",  # Netherlands (Eredivisie)
+                    "BE",  # Belgium (Jupiler Pro League)
+                    "TR",  # Turkey (Süper Lig)
+                    "GR",  # Greece (Super League)
+                ],
                 from_hours=0.5,  # Starting in 30 mins
                 to_hours=12,  # Up to 12 hours ahead
-                max_results=50,
+                max_results=100,  # Increased for more markets
             )
 
             # Fetch markets
@@ -310,10 +380,17 @@ class PaperTradingEngine:
                     if not strategy.is_enabled:
                         continue
 
-                    if not strategy.supports_market(market):
+                    supports = strategy.supports_market(market)
+                    if strategy.name == "lay_the_draw" and supports:
+                        logger.info(
+                            "LTD passed supports_market",
+                            market=market.event_name,
+                            sport=market.sport,
+                        )
+                    if not supports:
                         continue
 
-                    signal = strategy.evaluate(market)
+                    signal = await strategy.evaluate(market)
                     if signal:
                         await self.process_signal(signal)
 
@@ -394,6 +471,10 @@ class PaperTradingEngine:
             success, pnl = self._simulator.settle_bet(bet.id, selection_won)
 
             if success:
+                # Remove from tracking (market is now available for new bets)
+                if bet.strategy in self._markets_with_bets:
+                    self._markets_with_bets[bet.strategy].discard(bet.market_id)
+
                 # Notify
                 await notifier.bet_settled(bet)
 
@@ -422,12 +503,94 @@ class PaperTradingEngine:
         except Exception as e:
             logger.error("Error settling bet", bet_id=bet.bet_ref, error=str(e))
 
+    async def settle_stale_bets(self) -> None:
+        """
+        Settle bets that are too old to get market data for.
+
+        For paper trading, we simulate results based on odds:
+        - Implied probability determines win chance
+        - This provides realistic win/loss distribution
+        """
+        import random
+        from datetime import datetime, timedelta
+
+        if not self._simulator:
+            return
+
+        try:
+            open_bets = self._simulator.get_open_bets()
+            if not open_bets:
+                return
+
+            # Threshold: bets placed more than 4 hours ago
+            stale_threshold = datetime.utcnow() - timedelta(hours=4)
+            stale_bets = [b for b in open_bets if b.placed_at < stale_threshold]
+
+            if not stale_bets:
+                return
+
+            logger.info(
+                "Settling stale bets",
+                count=len(stale_bets),
+                threshold="4 hours",
+            )
+
+            for bet in stale_bets:
+                # Simulate result based on odds (implied probability)
+                # At odds of 2.0, implied prob is 50% = 50% win rate
+                # At odds of 5.0, implied prob is 20% = 20% win rate
+                implied_prob = 1.0 / bet.matched_odds if bet.matched_odds > 0 else 0.5
+                selection_won = random.random() < implied_prob
+
+                success, pnl = self._simulator.settle_bet(bet.id, selection_won)
+
+                if success:
+                    # Remove from tracking (market is now available for new bets)
+                    if bet.strategy in self._markets_with_bets:
+                        self._markets_with_bets[bet.strategy].discard(bet.market_id)
+
+                    # Update database
+                    try:
+                        async with db.session() as session:
+                            bet_repo = BetRepository(session)
+                            if bet.id:
+                                await bet_repo.settle(
+                                    bet.id,
+                                    bet.result,
+                                    bet.profit_loss,
+                                    bet.commission,
+                                )
+                                await session.commit()
+                    except Exception as db_error:
+                        logger.warning("Failed to update DB for stale bet", error=str(db_error)[:100])
+
+                    logger.info(
+                        "Stale bet settled (simulated)",
+                        selection=bet.selection_name[:20],
+                        odds=f"{bet.matched_odds:.2f}",
+                        result="WIN" if selection_won else "LOSS",
+                        pnl=f"£{pnl:+.2f}",
+                    )
+
+        except Exception as e:
+            logger.error("Error settling stale bets", error=str(e))
+
     async def process_signal(self, signal: BetSignal) -> None:
         """Process a betting signal."""
         if not self._simulator:
             return
 
         try:
+            # Check if we already have a bet on this market for this strategy
+            strategy_markets = self._markets_with_bets.get(signal.strategy, set())
+            if signal.market_id in strategy_markets:
+                logger.debug(
+                    "Skipping signal - already have bet on this market",
+                    strategy=signal.strategy,
+                    market_id=signal.market_id,
+                )
+                return
+
             # Calculate stake if not set
             if signal.stake <= 0:
                 signal.stake = calculate_stake(self._simulator.available_balance)
@@ -436,6 +599,11 @@ class PaperTradingEngine:
             success, message, bet = self._simulator.place_order(signal)
 
             if success and bet:
+                # Track this market to prevent duplicates
+                if signal.strategy not in self._markets_with_bets:
+                    self._markets_with_bets[signal.strategy] = set()
+                self._markets_with_bets[signal.strategy].add(signal.market_id)
+
                 # Send notification FIRST (before database which can fail)
                 await notifier.bet_placed(bet)
                 self._bets_today += 1
@@ -482,11 +650,13 @@ class PaperTradingEngine:
                         error=str(db_error)[:100],
                     )
 
-                # Record in strategy if needed (for LTD)
+                # Record in strategy if needed (for LTD and daily limits)
                 for strategy in self._strategies:
                     if strategy.name == signal.strategy:
                         if hasattr(strategy, "record_entry"):
                             strategy.record_entry(signal.market_id, bet)
+                        if hasattr(strategy, "record_bet_placed"):
+                            strategy.record_bet_placed()
                         break
             else:
                 logger.debug(

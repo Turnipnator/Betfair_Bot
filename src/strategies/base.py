@@ -63,6 +63,12 @@ class BaseStrategy(ABC):
         """
         # Check sport
         if market.sport not in self.supported_sports:
+            if self.name == "lay_the_draw":
+                logger.info(
+                    "LTD: Sport mismatch",
+                    market_sport=market.sport,
+                    supported=self.supported_sports,
+                )
             return False
 
         # Check in-play requirement
@@ -70,12 +76,14 @@ class BaseStrategy(ABC):
             return False
 
         if not self.requires_inplay and market.in_play:
+            if self.name == "lay_the_draw":
+                logger.info("LTD: Market is in-play, skipping")
             return False
 
         return True
 
     @abstractmethod
-    def evaluate(self, market: Market) -> Optional[BetSignal]:
+    async def evaluate(self, market: Market) -> Optional[BetSignal]:
         """
         Evaluate a market for betting opportunities.
 

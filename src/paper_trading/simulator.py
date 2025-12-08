@@ -70,6 +70,37 @@ class PaperTradingSimulator:
             bankroll=starting_bankroll,
         )
 
+    def load_bets_from_list(self, bets: list[Bet]) -> int:
+        """
+        Load existing bets into memory (e.g., from database on restart).
+
+        Args:
+            bets: List of Bet objects to load
+
+        Returns:
+            Number of bets loaded
+        """
+        loaded = 0
+        for bet in bets:
+            if bet.id and bet.id not in self._bets:
+                self._bets[bet.id] = bet
+                self._bet_counter = max(self._bet_counter, bet.id)
+
+                # Update reserved balance for open bets
+                if bet.status != BetStatus.SETTLED:
+                    self._reserved += bet.stake
+
+                loaded += 1
+
+        if loaded > 0:
+            logger.info(
+                "Loaded bets from database",
+                count=loaded,
+                reserved=f"£{self._reserved:.2f}",
+            )
+
+        return loaded
+
     @property
     def bankroll(self) -> float:
         """Current bankroll."""
@@ -105,6 +136,13 @@ class PaperTradingSimulator:
         )
 
         if not risk_check.allowed:
+            logger.info(
+                "Bet rejected by risk manager",
+                selection=signal.selection_name,
+                reason=risk_check.reason,
+                stake=signal.stake,
+                odds=signal.odds,
+            )
             return False, risk_check.reason, None
 
         # Adjust stake if needed
@@ -117,6 +155,12 @@ class PaperTradingSimulator:
             required = stake * (signal.odds - 1)  # Lay liability
 
         if required > self.available_balance:
+            logger.info(
+                "Bet rejected: insufficient balance",
+                selection=signal.selection_name,
+                required=required,
+                available=self.available_balance,
+            )
             return False, f"Insufficient balance: need £{required:.2f}, have £{self.available_balance:.2f}", None
 
         # Create the bet

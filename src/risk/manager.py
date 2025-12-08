@@ -192,6 +192,16 @@ class RiskManager:
         max_exposure = bankroll * (settings.risk.max_exposure_percent / 100)
         new_exposure = current_exposure + liability
 
+        logger.info(
+            "Exposure check",
+            current=current_exposure,
+            max=max_exposure,
+            new=new_exposure,
+            bankroll=bankroll,
+            stake=stake,
+            liability=liability,
+        )
+
         if new_exposure > max_exposure:
             # Calculate what stake would be allowed
             available_exposure = max_exposure - current_exposure

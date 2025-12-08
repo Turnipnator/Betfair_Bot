@@ -1,0 +1,636 @@
+"""
+Football Data Service.
+
+Fetches and caches team statistics from football-data.co.uk
+for use in the Poisson prediction model.
+"""
+
+import csv
+import io
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from typing import Optional
+
+import httpx
+
+from config.logging_config import get_logger
+
+logger = get_logger(__name__)
+
+
+# Football-data.co.uk CSV URLs for current season (2024-25)
+LEAGUE_URLS = {
+    # England
+    "E0": "https://www.football-data.co.uk/mmz4281/2425/E0.csv",  # Premier League
+    "E1": "https://www.football-data.co.uk/mmz4281/2425/E1.csv",  # Championship
+    "E2": "https://www.football-data.co.uk/mmz4281/2425/E2.csv",  # League One
+    "E3": "https://www.football-data.co.uk/mmz4281/2425/E3.csv",  # League Two
+    # Scotland
+    "SC0": "https://www.football-data.co.uk/mmz4281/2425/SC0.csv",  # Scottish Premiership
+    "SC1": "https://www.football-data.co.uk/mmz4281/2425/SC1.csv",  # Scottish Championship
+    # Spain
+    "SP1": "https://www.football-data.co.uk/mmz4281/2425/SP1.csv",  # La Liga
+    "SP2": "https://www.football-data.co.uk/mmz4281/2425/SP2.csv",  # Segunda División
+    # Germany
+    "D1": "https://www.football-data.co.uk/mmz4281/2425/D1.csv",  # Bundesliga
+    "D2": "https://www.football-data.co.uk/mmz4281/2425/D2.csv",  # 2. Bundesliga
+    # Italy
+    "I1": "https://www.football-data.co.uk/mmz4281/2425/I1.csv",  # Serie A
+    "I2": "https://www.football-data.co.uk/mmz4281/2425/I2.csv",  # Serie B
+    # France
+    "F1": "https://www.football-data.co.uk/mmz4281/2425/F1.csv",  # Ligue 1
+    "F2": "https://www.football-data.co.uk/mmz4281/2425/F2.csv",  # Ligue 2
+    # Portugal
+    "P1": "https://www.football-data.co.uk/mmz4281/2425/P1.csv",  # Primeira Liga
+    # Netherlands
+    "N1": "https://www.football-data.co.uk/mmz4281/2425/N1.csv",  # Eredivisie
+    # Belgium
+    "B1": "https://www.football-data.co.uk/mmz4281/2425/B1.csv",  # Jupiler Pro League
+    # Turkey
+    "T1": "https://www.football-data.co.uk/mmz4281/2425/T1.csv",  # Süper Lig
+    # Greece
+    "G1": "https://www.football-data.co.uk/mmz4281/2425/G1.csv",  # Super League Greece
+}
+
+# Map common league names to codes
+LEAGUE_NAME_MAP = {
+    # England
+    "premier league": "E0",
+    "championship": "E1",
+    "league one": "E2",
+    "league two": "E3",
+    "epl": "E0",
+    "eng 1": "E0",
+    "eng 2": "E1",
+    # Scotland
+    "scottish premiership": "SC0",
+    "scottish championship": "SC1",
+    "sco 1": "SC0",
+    # Spain
+    "la liga": "SP1",
+    "laliga": "SP1",
+    "primera division": "SP1",
+    "segunda": "SP2",
+    "segunda division": "SP2",
+    "esp 1": "SP1",
+    "esp 2": "SP2",
+    # Germany
+    "bundesliga": "D1",
+    "2. bundesliga": "D2",
+    "ger 1": "D1",
+    "ger 2": "D2",
+    # Italy
+    "serie a": "I1",
+    "serie b": "I2",
+    "ita 1": "I1",
+    "ita 2": "I2",
+    # France
+    "ligue 1": "F1",
+    "ligue 2": "F2",
+    "fra 1": "F1",
+    "fra 2": "F2",
+    # Portugal
+    "primeira liga": "P1",
+    "liga portugal": "P1",
+    "por 1": "P1",
+    # Netherlands
+    "eredivisie": "N1",
+    "ned 1": "N1",
+    # Belgium
+    "jupiler": "B1",
+    "jupiler pro league": "B1",
+    "bel 1": "B1",
+    # Turkey
+    "super lig": "T1",
+    "tur 1": "T1",
+    # Greece
+    "super league greece": "G1",
+    "gre 1": "G1",
+}
+
+
+@dataclass
+class TeamStats:
+    """Statistics for a single team."""
+
+    team_name: str
+    matches_played: int = 0
+
+    # Home stats
+    home_played: int = 0
+    home_goals_for: int = 0
+    home_goals_against: int = 0
+    home_wins: int = 0
+    home_draws: int = 0
+    home_losses: int = 0
+
+    # Away stats
+    away_played: int = 0
+    away_goals_for: int = 0
+    away_goals_against: int = 0
+    away_wins: int = 0
+    away_draws: int = 0
+    away_losses: int = 0
+
+    @property
+    def home_scored_avg(self) -> float:
+        """Average goals scored at home."""
+        return self.home_goals_for / self.home_played if self.home_played > 0 else 0.0
+
+    @property
+    def home_conceded_avg(self) -> float:
+        """Average goals conceded at home."""
+        return self.home_goals_against / self.home_played if self.home_played > 0 else 0.0
+
+    @property
+    def away_scored_avg(self) -> float:
+        """Average goals scored away."""
+        return self.away_goals_for / self.away_played if self.away_played > 0 else 0.0
+
+    @property
+    def away_conceded_avg(self) -> float:
+        """Average goals conceded away."""
+        return self.away_goals_against / self.away_played if self.away_played > 0 else 0.0
+
+    @property
+    def total_goals_for(self) -> int:
+        """Total goals scored."""
+        return self.home_goals_for + self.away_goals_for
+
+    @property
+    def total_goals_against(self) -> int:
+        """Total goals conceded."""
+        return self.home_goals_against + self.away_goals_against
+
+
+@dataclass
+class LeagueStats:
+    """Statistics for an entire league."""
+
+    league_code: str
+    teams: dict[str, TeamStats] = field(default_factory=dict)
+    total_matches: int = 0
+    total_home_goals: int = 0
+    total_away_goals: int = 0
+    last_updated: Optional[datetime] = None
+
+    @property
+    def avg_home_goals(self) -> float:
+        """League average home goals per match."""
+        return self.total_home_goals / self.total_matches if self.total_matches > 0 else 1.5
+
+    @property
+    def avg_away_goals(self) -> float:
+        """League average away goals per match."""
+        return self.total_away_goals / self.total_matches if self.total_matches > 0 else 1.2
+
+
+class FootballDataService:
+    """
+    Service for fetching and caching football statistics.
+
+    Uses football-data.co.uk CSV files for historical results.
+    """
+
+    def __init__(self, cache_duration_hours: int = 6):
+        """
+        Initialize the service.
+
+        Args:
+            cache_duration_hours: How long to cache league data
+        """
+        self._cache: dict[str, LeagueStats] = {}
+        self._cache_duration = timedelta(hours=cache_duration_hours)
+        self._client = httpx.AsyncClient(timeout=30.0)
+
+    async def close(self):
+        """Close the HTTP client."""
+        await self._client.aclose()
+
+    def _normalize_team_name(self, name: str) -> str:
+        """
+        Normalize team name for matching.
+
+        Handles common variations between data sources.
+        """
+        # Common mappings between football-data and Betfair names
+        name_mappings = {
+            # England
+            "man united": "manchester united",
+            "man utd": "manchester united",
+            "man city": "manchester city",
+            "newcastle": "newcastle united",
+            "tottenham": "tottenham hotspur",
+            "spurs": "tottenham hotspur",
+            "wolves": "wolverhampton wanderers",
+            "wolverhampton": "wolverhampton wanderers",
+            "nottingham": "nottingham forest",
+            "nott'm forest": "nottingham forest",
+            "west ham": "west ham united",
+            "sheffield utd": "sheffield united",
+            "brighton": "brighton and hove albion",
+            "leicester": "leicester city",
+            "leeds": "leeds united",
+            "ipswich": "ipswich town",
+            "luton": "luton town",
+            "burnley": "burnley fc",
+            "qpr": "queens park rangers",
+            # Spain
+            "atletico madrid": "ath madrid",
+            "atlético madrid": "ath madrid",
+            "atletico": "ath madrid",
+            "athletic bilbao": "ath bilbao",
+            "athletic": "ath bilbao",
+            "real sociedad": "sociedad",
+            "celta vigo": "celta",
+            "deportivo alaves": "alaves",
+            "rayo vallecano": "vallecano",
+            "real betis": "betis",
+            "real valladolid": "valladolid",
+            "fc barcelona": "barcelona",
+            "barca": "barcelona",
+            "real madrid cf": "real madrid",
+            # Germany
+            "bayern munich": "bayern",
+            "bayern munchen": "bayern",
+            "bayern münchen": "bayern",
+            "bayer leverkusen": "leverkusen",
+            "borussia dortmund": "dortmund",
+            "bvb": "dortmund",
+            "borussia monchengladbach": "m'gladbach",
+            "borussia mönchengladbach": "m'gladbach",
+            "gladbach": "m'gladbach",
+            "rb leipzig": "leipzig",
+            "rasenballsport leipzig": "leipzig",
+            "eintracht frankfurt": "ein frankfurt",
+            "vfb stuttgart": "stuttgart",
+            "vfl wolfsburg": "wolfsburg",
+            "fc koln": "fc cologne",
+            "1. fc köln": "fc cologne",
+            "cologne": "fc cologne",
+            "sc freiburg": "freiburg",
+            "tsg hoffenheim": "hoffenheim",
+            "fc augsburg": "augsburg",
+            "werder bremen": "werder",
+            "union berlin": "union berlin",
+            "hertha berlin": "hertha",
+            "hertha bsc": "hertha",
+            # Italy
+            "inter milan": "inter",
+            "internazionale": "inter",
+            "ac milan": "milan",
+            "as roma": "roma",
+            "ssc napoli": "napoli",
+            "juventus fc": "juventus",
+            "juve": "juventus",
+            "atalanta bc": "atalanta",
+            "ss lazio": "lazio",
+            "acf fiorentina": "fiorentina",
+            "torino fc": "torino",
+            "hellas verona": "verona",
+            "us sassuolo": "sassuolo",
+            "bologna fc": "bologna",
+            "empoli fc": "empoli",
+            "udinese calcio": "udinese",
+            "us lecce": "lecce",
+            "cagliari calcio": "cagliari",
+            "genoa cfc": "genoa",
+            "parma calcio": "parma",
+            "como 1907": "como",
+            "venezia fc": "venezia",
+            # France
+            "paris saint-germain": "paris sg",
+            "paris saint germain": "paris sg",
+            "psg": "paris sg",
+            "olympique marseille": "marseille",
+            "om": "marseille",
+            "olympique lyon": "lyon",
+            "ol": "lyon",
+            "as monaco": "monaco",
+            "ogc nice": "nice",
+            "rc lens": "lens",
+            "stade rennais": "rennes",
+            "losc lille": "lille",
+            "lille osc": "lille",
+            "fc nantes": "nantes",
+            "racing strasbourg": "strasbourg",
+            "stade brestois": "brest",
+            "montpellier hsc": "montpellier",
+            "toulouse fc": "toulouse",
+            "stade reims": "reims",
+            "fc lorient": "lorient",
+            "le havre ac": "le havre",
+            "clermont foot": "clermont",
+            "fc metz": "metz",
+            # Portugal
+            "fc porto": "porto",
+            "sporting cp": "sporting",
+            "sporting lisbon": "sporting",
+            "sl benfica": "benfica",
+            "sc braga": "sp braga",
+            "vitoria guimaraes": "guimaraes",
+            "vitória guimarães": "guimaraes",
+            "boavista fc": "boavista",
+            "rio ave fc": "rio ave",
+            "cd santa clara": "santa clara",
+            "fc famalicao": "famalicao",
+            "gil vicente fc": "gil vicente",
+            "cs maritimo": "maritimo",
+            "fc arouca": "arouca",
+            "casa pia": "casa pia",
+            # Netherlands
+            "ajax amsterdam": "ajax",
+            "afc ajax": "ajax",
+            "psv eindhoven": "psv",
+            "feyenoord rotterdam": "feyenoord",
+            "az alkmaar": "az",
+            "fc twente": "twente",
+            "fc utrecht": "utrecht",
+            "vitesse arnhem": "vitesse",
+            "sc heerenveen": "heerenveen",
+            "fc groningen": "groningen",
+            "sparta rotterdam": "sparta",
+            "nec nijmegen": "nec",
+            "go ahead eagles": "go ahead",
+            "rkc waalwijk": "waalwijk",
+            "fortuna sittard": "fortuna",
+            # Belgium
+            "club brugge kv": "club brugge",
+            "club bruges": "club brugge",
+            "rsc anderlecht": "anderlecht",
+            "krc genk": "genk",
+            "racing genk": "genk",
+            "royal antwerp": "antwerp",
+            "standard liege": "standard",
+            "standard liège": "standard",
+            "kaa gent": "gent",
+            "oh leuven": "oh leuven",
+            "oud-heverlee leuven": "oh leuven",
+            "cercle brugge": "cercle bruges",
+            "royale union sg": "union sg",
+            "union st gilloise": "union sg",
+            "charleroi": "charleroi",
+            "kv mechelen": "mechelen",
+            "sint-truiden": "st truiden",
+            # Turkey
+            "galatasaray sk": "galatasaray",
+            "fenerbahce sk": "fenerbahce",
+            "besiktas jk": "besiktas",
+            "trabzonspor": "trabzonspor",
+            "istanbul basaksehir": "basaksehir",
+            "antalyaspor": "antalyaspor",
+            "konyaspor": "konyaspor",
+            "sivasspor": "sivasspor",
+            "alanyaspor": "alanyaspor",
+            "kasimpasa": "kasimpasa",
+            "kayserispor": "kayserispor",
+            # Greece
+            "olympiacos piraeus": "olympiakos",
+            "olympiacos": "olympiakos",
+            "panathinaikos fc": "panathinaikos",
+            "aek athens": "aek",
+            "paok thessaloniki": "paok",
+            "aris thessaloniki": "aris",
+        }
+
+        normalized = name.lower().strip()
+        return name_mappings.get(normalized, normalized)
+
+    async def fetch_league_data(self, league_code: str) -> Optional[LeagueStats]:
+        """
+        Fetch and parse league data from football-data.co.uk.
+
+        Args:
+            league_code: League code (E0, E1, SC0, etc.)
+
+        Returns:
+            LeagueStats object or None if fetch failed
+        """
+        url = LEAGUE_URLS.get(league_code)
+        if not url:
+            logger.warning(f"Unknown league code: {league_code}")
+            return None
+
+        try:
+            response = await self._client.get(url)
+            response.raise_for_status()
+
+            # Parse CSV
+            content = response.text
+            reader = csv.DictReader(io.StringIO(content))
+
+            league_stats = LeagueStats(league_code=league_code)
+
+            for row in reader:
+                try:
+                    home_team = row.get("HomeTeam", "").strip()
+                    away_team = row.get("AwayTeam", "").strip()
+
+                    # Try different column names for goals
+                    home_goals = int(row.get("FTHG") or row.get("HG") or 0)
+                    away_goals = int(row.get("FTAG") or row.get("AG") or 0)
+
+                    if not home_team or not away_team:
+                        continue
+
+                    # Update league totals
+                    league_stats.total_matches += 1
+                    league_stats.total_home_goals += home_goals
+                    league_stats.total_away_goals += away_goals
+
+                    # Update home team stats
+                    if home_team not in league_stats.teams:
+                        league_stats.teams[home_team] = TeamStats(team_name=home_team)
+
+                    home_stats = league_stats.teams[home_team]
+                    home_stats.matches_played += 1
+                    home_stats.home_played += 1
+                    home_stats.home_goals_for += home_goals
+                    home_stats.home_goals_against += away_goals
+
+                    if home_goals > away_goals:
+                        home_stats.home_wins += 1
+                    elif home_goals == away_goals:
+                        home_stats.home_draws += 1
+                    else:
+                        home_stats.home_losses += 1
+
+                    # Update away team stats
+                    if away_team not in league_stats.teams:
+                        league_stats.teams[away_team] = TeamStats(team_name=away_team)
+
+                    away_stats = league_stats.teams[away_team]
+                    away_stats.matches_played += 1
+                    away_stats.away_played += 1
+                    away_stats.away_goals_for += away_goals
+                    away_stats.away_goals_against += home_goals
+
+                    if away_goals > home_goals:
+                        away_stats.away_wins += 1
+                    elif away_goals == home_goals:
+                        away_stats.away_draws += 1
+                    else:
+                        away_stats.away_losses += 1
+
+                except (ValueError, KeyError) as e:
+                    continue
+
+            league_stats.last_updated = datetime.utcnow()
+
+            logger.info(
+                "Fetched league data",
+                league=league_code,
+                teams=len(league_stats.teams),
+                matches=league_stats.total_matches,
+                avg_home_goals=f"{league_stats.avg_home_goals:.2f}",
+                avg_away_goals=f"{league_stats.avg_away_goals:.2f}",
+            )
+
+            return league_stats
+
+        except Exception as e:
+            logger.error(f"Failed to fetch league data for {league_code}: {e}")
+            return None
+
+    async def get_league_stats(self, league_code: str, force_refresh: bool = False) -> Optional[LeagueStats]:
+        """
+        Get league statistics, using cache if available.
+
+        Args:
+            league_code: League code
+            force_refresh: Force refresh from source
+
+        Returns:
+            LeagueStats or None
+        """
+        # Check cache
+        if not force_refresh and league_code in self._cache:
+            cached = self._cache[league_code]
+            if cached.last_updated and datetime.utcnow() - cached.last_updated < self._cache_duration:
+                return cached
+
+        # Fetch fresh data
+        stats = await self.fetch_league_data(league_code)
+        if stats:
+            self._cache[league_code] = stats
+
+        return stats
+
+    async def get_team_stats(
+        self,
+        team_name: str,
+        league_code: Optional[str] = None
+    ) -> Optional[TeamStats]:
+        """
+        Get statistics for a specific team.
+
+        Args:
+            team_name: Team name (will be normalized)
+            league_code: Optional league code to search in
+
+        Returns:
+            TeamStats or None if not found
+        """
+        normalized_name = self._normalize_team_name(team_name)
+
+        # If league specified, search only there
+        if league_code:
+            league = await self.get_league_stats(league_code)
+            if league:
+                for name, stats in league.teams.items():
+                    if self._normalize_team_name(name) == normalized_name:
+                        return stats
+            return None
+
+        # Search all cached leagues
+        for league_code in LEAGUE_URLS.keys():
+            league = await self.get_league_stats(league_code)
+            if league:
+                for name, stats in league.teams.items():
+                    if self._normalize_team_name(name) == normalized_name:
+                        return stats
+
+        return None
+
+    async def get_match_stats(
+        self,
+        home_team: str,
+        away_team: str,
+        league_code: Optional[str] = None,
+    ) -> Optional[tuple[TeamStats, TeamStats, LeagueStats]]:
+        """
+        Get statistics for a match between two teams.
+
+        Args:
+            home_team: Home team name
+            away_team: Away team name
+            league_code: Optional league code
+
+        Returns:
+            Tuple of (home_stats, away_stats, league_stats) or None
+        """
+        # Try to find both teams
+        leagues_to_search = [league_code] if league_code else list(LEAGUE_URLS.keys())
+
+        for lc in leagues_to_search:
+            league = await self.get_league_stats(lc)
+            if not league:
+                continue
+
+            home_stats = None
+            away_stats = None
+            normalized_home = self._normalize_team_name(home_team)
+            normalized_away = self._normalize_team_name(away_team)
+
+            for name, stats in league.teams.items():
+                norm_name = self._normalize_team_name(name)
+                if norm_name == normalized_home:
+                    home_stats = stats
+                elif norm_name == normalized_away:
+                    away_stats = stats
+
+            if home_stats and away_stats:
+                logger.debug(
+                    "Found match stats",
+                    home=home_team,
+                    away=away_team,
+                    league=lc,
+                )
+                return (home_stats, away_stats, league)
+
+        logger.debug(
+            "Could not find stats for match",
+            home=home_team,
+            away=away_team,
+        )
+        return None
+
+    def detect_league_from_teams(self, team_names: list[str]) -> Optional[str]:
+        """
+        Try to detect which league based on team names.
+
+        Args:
+            team_names: List of team names in the market
+
+        Returns:
+            League code or None
+        """
+        # Check each cached league for team presence
+        for league_code, league in self._cache.items():
+            matches = 0
+            for team in team_names:
+                normalized = self._normalize_team_name(team)
+                for name in league.teams.keys():
+                    if self._normalize_team_name(name) == normalized:
+                        matches += 1
+                        break
+
+            # If most teams found, likely this league
+            if matches >= len(team_names) * 0.5:
+                return league_code
+
+        return None
+
+
+# Global service instance
+football_data_service = FootballDataService()

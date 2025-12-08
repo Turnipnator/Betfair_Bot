@@ -2,9 +2,10 @@
 Value Betting Strategy.
 
 Bets when model probability exceeds implied market probability by a threshold.
-Works for both horse racing and football.
+Football only - uses Poisson model for probability estimation.
 """
 
+from datetime import date
 from typing import Optional
 
 from config import settings
@@ -14,6 +15,18 @@ from src.strategies.base import BaseStrategy
 from src.utils import calculate_edge, calculate_stake, decimal_to_implied_prob
 
 logger = get_logger(__name__)
+
+# Global football data service - initialized lazily
+_football_data_service = None
+
+
+async def get_football_data_service():
+    """Get or initialize the football data service."""
+    global _football_data_service
+    if _football_data_service is None:
+        from src.data.football_data import FootballDataService
+        _football_data_service = FootballDataService()
+    return _football_data_service
 
 
 class ValueBettingStrategy(BaseStrategy):
@@ -27,14 +40,14 @@ class ValueBettingStrategy(BaseStrategy):
     """
 
     name: str = "value_betting"
-    supported_sports: list[Sport] = [Sport.HORSE_RACING, Sport.FOOTBALL]
+    supported_sports: list[Sport] = [Sport.FOOTBALL]
     requires_inplay: bool = False
 
     def __init__(
         self,
         min_edge: Optional[float] = None,
         min_odds: float = 1.50,
-        max_odds: float = 10.0,
+        max_odds: Optional[float] = None,
         min_volume: float = 100.0,  # Lowered from 1000 for paper trading
     ) -> None:
         """
@@ -43,15 +56,20 @@ class ValueBettingStrategy(BaseStrategy):
         Args:
             min_edge: Minimum edge required (default from settings)
             min_odds: Minimum odds to consider
-            max_odds: Maximum odds to consider
+            max_odds: Maximum odds to consider (default from settings)
             min_volume: Minimum matched volume on selection
         """
         super().__init__()
 
         self.min_edge = min_edge or settings.strategy.value_min_edge
         self.min_odds = min_odds
-        self.max_odds = max_odds
+        self.max_odds = max_odds or settings.strategy.value_max_odds
         self.min_volume = min_volume
+        self.daily_bet_limit = settings.strategy.daily_bet_limit
+
+        # Track bets placed today
+        self._bets_today = 0
+        self._last_reset_date: Optional[date] = None
 
         # Model probabilities - these would come from external models
         # For now, we'll store them when evaluate is called
@@ -66,7 +84,37 @@ class ValueBettingStrategy(BaseStrategy):
         """
         self._model_probabilities = probs
 
-    def evaluate(self, market: Market) -> Optional[BetSignal]:
+    def _check_daily_limit(self) -> bool:
+        """
+        Check if we've hit the daily bet limit.
+
+        Returns:
+            True if we can place more bets, False if limit reached
+        """
+        # No limit if set to 0
+        if self.daily_bet_limit <= 0:
+            return True
+
+        # Reset counter if new day
+        today = date.today()
+        if self._last_reset_date != today:
+            self._bets_today = 0
+            self._last_reset_date = today
+            logger.info("Daily bet counter reset", limit=self.daily_bet_limit)
+
+        return self._bets_today < self.daily_bet_limit
+
+    def record_bet_placed(self) -> None:
+        """Record that a bet was placed (call after successful placement)."""
+        self._bets_today += 1
+        logger.info(
+            "Bet recorded",
+            bets_today=self._bets_today,
+            limit=self.daily_bet_limit,
+            remaining=max(0, self.daily_bet_limit - self._bets_today),
+        )
+
+    async def evaluate(self, market: Market) -> Optional[BetSignal]:
         """
         Evaluate market for value betting opportunities.
 
@@ -76,9 +124,18 @@ class ValueBettingStrategy(BaseStrategy):
         Returns:
             BetSignal for best value opportunity, or None
         """
+        # Check daily bet limit first
+        if not self._check_daily_limit():
+            logger.debug(
+                "Daily bet limit reached",
+                bets_today=self._bets_today,
+                limit=self.daily_bet_limit,
+            )
+            return None
+
         # Clear and regenerate model probabilities for each market
         self._model_probabilities = {}
-        self._generate_model_probabilities(market)
+        await self._generate_model_probabilities(market)
 
         if not self.pre_evaluate(market):
             return None
@@ -128,20 +185,54 @@ class ValueBettingStrategy(BaseStrategy):
 
         return best_signal
 
-    def _generate_model_probabilities(self, market: Market) -> None:
+    async def _generate_model_probabilities(self, market: Market) -> None:
         """
         Generate model probabilities from market data.
 
-        Uses a simple approach: calculate "fair" probabilities by removing
-        the overround, then look for selections where back odds are higher
-        than expected (potential value).
+        For football Match Odds markets: Uses Poisson model with real team
+        statistics from football-data.co.uk.
 
-        For paper trading, we add some randomness to simulate model uncertainty
-        which will occasionally find "value" to test the betting flow.
+        For horse racing: Uses Shin model with favourite-longshot bias
+        correction to extract true probabilities from market odds.
+
+        For other markets: Falls back to fair odds calculation with small
+        random adjustments for paper testing.
         """
         import random
 
-        # Calculate implied probabilities from back prices
+        # Check if this is a football Match Odds market
+        if (market.sport == Sport.FOOTBALL and
+            self._is_match_odds_market(market)):
+            # Try to use real Poisson model
+            try:
+                await self._generate_football_poisson_probs(market)
+
+                # If we got probabilities from Poisson model, use them
+                if self._model_probabilities:
+                    return
+            except Exception as e:
+                logger.warning(
+                    "Failed to generate Poisson probabilities, using fallback",
+                    error=str(e),
+                    market=market.market_name,
+                )
+
+        # Check if this is horse racing - use Shin model
+        if market.sport == Sport.HORSE_RACING:
+            try:
+                self._generate_racing_shin_probs(market)
+
+                # If we got probabilities from Shin model, use them
+                if self._model_probabilities:
+                    return
+            except Exception as e:
+                logger.warning(
+                    "Failed to generate Shin probabilities, using fallback",
+                    error=str(e),
+                    market=market.market_name,
+                )
+
+        # Fallback: Calculate implied probabilities from back prices
         implied_probs = {}
         total_implied = 0.0
 
@@ -161,7 +252,7 @@ class ValueBettingStrategy(BaseStrategy):
 
         overround = total_implied - 1.0
         logger.info(
-            "Generating model probabilities",
+            "Generating model probabilities (fallback method)",
             market=market.market_name,
             runners=len(implied_probs),
             overround=f"{overround:.1%}",
@@ -177,6 +268,209 @@ class ValueBettingStrategy(BaseStrategy):
             adjustment = random.uniform(-0.02, 0.12)
             model_prob = min(0.95, max(0.01, fair_prob + adjustment))
             self._model_probabilities[selection_id] = model_prob
+
+    def _is_match_odds_market(self, market: Market) -> bool:
+        """Check if this is a football match odds (1X2) market."""
+        market_name = market.market_name.lower()
+        return (
+            "match odds" in market_name or
+            market_name == "match odds" or
+            (len(market.runners) == 3 and any("draw" in r.name.lower() for r in market.runners))
+        )
+
+    async def _generate_football_poisson_probs(self, market: Market) -> None:
+        """
+        Generate probabilities using Poisson model with real team data.
+
+        Args:
+            market: Football Match Odds market
+        """
+        from src.strategies.models.poisson import FootballPoissonModel
+
+        # Get the football data service
+        data_service = await get_football_data_service()
+
+        # Parse team names from market
+        home_team, away_team = self._parse_team_names(market)
+        if not home_team or not away_team:
+            logger.debug(
+                "Could not parse team names",
+                market=market.market_name,
+            )
+            return
+
+        # Get team statistics
+        match_stats = await data_service.get_match_stats(home_team, away_team)
+        if not match_stats:
+            logger.info(
+                "No statistics found for teams",
+                home=home_team,
+                away=away_team,
+                market=market.market_name,
+            )
+            return
+
+        home_stats, away_stats, league_stats = match_stats
+
+        # Initialize Poisson model with league averages
+        poisson = FootballPoissonModel(
+            league_avg_home=league_stats.avg_home_goals,
+            league_avg_away=league_stats.avg_away_goals,
+        )
+
+        # Get prediction using team averages
+        # The model calculates attack/defense strengths internally
+        prediction = poisson.predict_match(
+            home_scored_avg=home_stats.home_scored_avg,
+            home_conceded_avg=home_stats.home_conceded_avg,
+            away_scored_avg=away_stats.away_scored_avg,
+            away_conceded_avg=away_stats.away_conceded_avg,
+        )
+
+        logger.info(
+            "Poisson prediction calculated",
+            home=home_team,
+            away=away_team,
+            home_prob=f"{prediction.home_win_prob:.1%}",
+            draw_prob=f"{prediction.draw_prob:.1%}",
+            away_prob=f"{prediction.away_win_prob:.1%}",
+            home_xg=f"{prediction.expected_home_goals:.2f}",
+            away_xg=f"{prediction.expected_away_goals:.2f}",
+            league=league_stats.league_code,
+        )
+
+        # Map predictions to runner selection IDs
+        self._model_probabilities = {}
+        for runner in market.runners:
+            runner_name = runner.name.lower()
+
+            if "draw" in runner_name or runner_name == "the draw":
+                self._model_probabilities[runner.selection_id] = prediction.draw_prob
+            elif self._is_home_team(runner.name, home_team, market):
+                self._model_probabilities[runner.selection_id] = prediction.home_win_prob
+            else:
+                self._model_probabilities[runner.selection_id] = prediction.away_win_prob
+
+    def _parse_team_names(self, market: Market) -> tuple[Optional[str], Optional[str]]:
+        """
+        Parse home and away team names from market.
+
+        Match Odds markets typically have format "Team A v Team B" in event_name
+        or have 3 runners: Home Team, Draw, Away Team
+        """
+        # Try to get from event name (e.g., "Man City v Liverpool")
+        event = market.event_name or market.market_name
+
+        # Common separators
+        for sep in [" v ", " vs ", " - "]:
+            if sep in event:
+                parts = event.split(sep)
+                if len(parts) == 2:
+                    return parts[0].strip(), parts[1].strip()
+
+        # Try to get from runners (excluding "The Draw")
+        teams = []
+        for runner in market.runners:
+            if "draw" not in runner.name.lower():
+                teams.append(runner.name)
+
+        if len(teams) == 2:
+            # First team listed is usually home
+            return teams[0], teams[1]
+
+        return None, None
+
+    def _is_home_team(self, runner_name: str, home_team: str, market: Market) -> bool:
+        """Check if runner represents the home team."""
+        # Normalize names for comparison
+        runner_lower = runner_name.lower().strip()
+        home_lower = home_team.lower().strip()
+
+        # Direct match
+        if runner_lower == home_lower:
+            return True
+
+        # Partial match (handles "Man City" vs "Manchester City")
+        if home_lower in runner_lower or runner_lower in home_lower:
+            return True
+
+        # Check position in market (home team usually listed first)
+        for i, runner in enumerate(market.runners):
+            if runner.name.lower() == runner_lower:
+                # If it's the first non-draw runner, likely home
+                return i == 0 or (i == 1 and "draw" in market.runners[0].name.lower())
+
+        return False
+
+    def _generate_racing_shin_probs(self, market: Market) -> None:
+        """
+        Generate probabilities for horse racing using the Shin model.
+
+        The Shin model extracts true probabilities from market odds by
+        accounting for the bookmaker margin in a statistically sound way.
+        We also apply favourite-longshot bias corrections.
+
+        Args:
+            market: Horse racing market
+        """
+        from src.strategies.models.racing import HorseRacingModel, get_field_size_factor
+
+        # Build runner list for the model
+        runners_data = []
+        for runner in market.runners:
+            if runner.status != "ACTIVE":
+                continue
+            if not runner.best_back_price or runner.best_back_price <= 1.0:
+                continue
+
+            runners_data.append({
+                'selection_id': runner.selection_id,
+                'name': runner.name,
+                'odds': runner.best_back_price,
+            })
+
+        if len(runners_data) < 2:
+            return
+
+        # Get predictions from the model
+        model = HorseRacingModel()
+        predictions = model.predict_race(runners_data)
+
+        if not predictions:
+            return
+
+        # Get field size factor (larger fields = less confident)
+        field_factor = get_field_size_factor(len(runners_data))
+
+        # Map to selection_id -> probability
+        self._model_probabilities = {}
+        for pred in predictions:
+            # Apply field size adjustment to the value edge
+            # In larger fields, we're less confident in our edge estimates
+            adjusted_prob = pred.true_probability
+
+            # Log significant value edges
+            if pred.value_edge > 0.03:
+                logger.debug(
+                    "Racing value candidate",
+                    runner=pred.selection_name[:20],
+                    rank=pred.rank,
+                    market_prob=f"{pred.market_probability:.1%}",
+                    true_prob=f"{pred.true_probability:.1%}",
+                    edge=f"{pred.value_edge:.1%}",
+                    field_factor=f"{field_factor:.2f}",
+                )
+
+            self._model_probabilities[pred.selection_id] = adjusted_prob
+
+        logger.info(
+            "Racing Shin model applied",
+            market=market.market_name[:30],
+            runners=len(predictions),
+            field_factor=f"{field_factor:.2f}",
+            favourite=predictions[0].selection_name[:20] if predictions else "N/A",
+            fav_true_prob=f"{predictions[0].true_probability:.1%}" if predictions else "N/A",
+        )
 
     def _evaluate_runner(
         self,

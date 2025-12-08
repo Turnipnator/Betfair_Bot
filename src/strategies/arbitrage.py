@@ -100,7 +100,7 @@ class ArbitrageStrategy(BaseStrategy):
         """Set callback function for alerting opportunities."""
         self._alert_callback = callback
 
-    def evaluate(self, market: Market) -> Optional[BetSignal]:
+    async def evaluate(self, market: Market) -> Optional[BetSignal]:
         """
         Evaluate market for arbitrage opportunities.
 
@@ -373,7 +373,7 @@ class ScalpingStrategy(BaseStrategy):
             "requires streaming API and fast execution"
         )
 
-    def evaluate(self, market: Market) -> Optional[BetSignal]:
+    async def evaluate(self, market: Market) -> Optional[BetSignal]:
         """
         Evaluate market for scalping opportunity.
 

@@ -126,14 +126,24 @@ class StrategySettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="", extra="ignore")
 
     enabled_strategies: str = Field(
-        default="value_betting",
+        default="value_betting,lay_the_draw",
         alias="ENABLED_STRATEGIES",
         description="Comma-separated list of enabled strategies",
     )
     value_min_edge: float = Field(
-        default=0.05,
+        default=0.08,
         alias="VALUE_MIN_EDGE",
-        description="Minimum edge for value betting (0.05 = 5%)",
+        description="Minimum edge for value betting (0.08 = 8%)",
+    )
+    value_max_odds: float = Field(
+        default=6.0,
+        alias="VALUE_MAX_ODDS",
+        description="Maximum odds to consider for value bets",
+    )
+    daily_bet_limit: int = Field(
+        default=20,
+        alias="DAILY_BET_LIMIT",
+        description="Maximum number of bets per day (0 = unlimited)",
     )
 
     def get_enabled_list(self) -> list[str]:

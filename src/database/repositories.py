@@ -177,6 +177,26 @@ class BetRepository:
         )
         return list(result.scalars().all())
 
+    async def get_total_pnl(self, is_paper: bool = True) -> float:
+        """Get total P&L from all settled bets."""
+        from sqlalchemy import func
+        result = await self.session.execute(
+            select(func.coalesce(func.sum(BetRecord.profit_loss), 0.0))
+            .where(BetRecord.is_paper == is_paper)
+            .where(BetRecord.status == "SETTLED")
+        )
+        return float(result.scalar() or 0.0)
+
+    async def get_open_market_ids(self, is_paper: bool = True) -> set[str]:
+        """Get market IDs that already have open bets (to prevent duplicates)."""
+        result = await self.session.execute(
+            select(BetRecord.market_id)
+            .where(BetRecord.is_paper == is_paper)
+            .where(BetRecord.status.in_(["PENDING", "PLACED", "MATCHED", "PARTIALLY_MATCHED"]))
+            .distinct()
+        )
+        return set(result.scalars().all())
+
     async def get_by_strategy(
         self,
         strategy: str,

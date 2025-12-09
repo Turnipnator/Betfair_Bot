@@ -584,15 +584,34 @@ class PaperTradingEngine:
             return
 
         try:
-            # Check if we already have a bet on this market for this strategy
+            # Check if we already have a bet on this market for this strategy (in-memory)
             strategy_markets = self._markets_with_bets.get(signal.strategy, set())
             if signal.market_id in strategy_markets:
                 logger.debug(
-                    "Skipping signal - already have bet on this market",
+                    "Skipping signal - already have bet on this market (memory)",
                     strategy=signal.strategy,
                     market_id=signal.market_id,
                 )
                 return
+
+            # Also check database to catch bets from previous sessions
+            try:
+                async with db.session() as session:
+                    bet_repo = BetRepository(session)
+                    existing = await bet_repo.get_by_market(signal.market_id)
+                    if any(b.strategy == signal.strategy and b.is_paper for b in existing):
+                        logger.debug(
+                            "Skipping signal - already have bet on this market (database)",
+                            strategy=signal.strategy,
+                            market_id=signal.market_id,
+                        )
+                        # Add to memory tracking to avoid repeat DB checks
+                        if signal.strategy not in self._markets_with_bets:
+                            self._markets_with_bets[signal.strategy] = set()
+                        self._markets_with_bets[signal.strategy].add(signal.market_id)
+                        return
+            except Exception as db_err:
+                logger.warning("DB check failed, proceeding with bet", error=str(db_err)[:50])
 
             # Calculate stake if not set
             if signal.stake <= 0:

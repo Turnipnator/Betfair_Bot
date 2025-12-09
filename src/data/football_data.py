@@ -25,9 +25,12 @@ LEAGUE_URLS = {
     "E1": "https://www.football-data.co.uk/mmz4281/2425/E1.csv",  # Championship
     "E2": "https://www.football-data.co.uk/mmz4281/2425/E2.csv",  # League One
     "E3": "https://www.football-data.co.uk/mmz4281/2425/E3.csv",  # League Two
+    "EC": "https://www.football-data.co.uk/mmz4281/2425/EC.csv",  # Conference
     # Scotland
     "SC0": "https://www.football-data.co.uk/mmz4281/2425/SC0.csv",  # Scottish Premiership
     "SC1": "https://www.football-data.co.uk/mmz4281/2425/SC1.csv",  # Scottish Championship
+    "SC2": "https://www.football-data.co.uk/mmz4281/2425/SC2.csv",  # Scottish League One
+    "SC3": "https://www.football-data.co.uk/mmz4281/2425/SC3.csv",  # Scottish League Two
     # Spain
     "SP1": "https://www.football-data.co.uk/mmz4281/2425/SP1.csv",  # La Liga
     "SP2": "https://www.football-data.co.uk/mmz4281/2425/SP2.csv",  # Segunda División
@@ -50,6 +53,43 @@ LEAGUE_URLS = {
     "T1": "https://www.football-data.co.uk/mmz4281/2425/T1.csv",  # Süper Lig
     # Greece
     "G1": "https://www.football-data.co.uk/mmz4281/2425/G1.csv",  # Super League Greece
+    # Additional European leagues
+    "A1": "https://www.football-data.co.uk/mmz4281/2425/A1.csv",  # Austria Bundesliga
+    "DNK": "https://www.football-data.co.uk/mmz4281/2425/DNK.csv",  # Denmark Superliga
+    "FIN": "https://www.football-data.co.uk/mmz4281/2425/FIN.csv",  # Finland Veikkausliiga
+    "IRL": "https://www.football-data.co.uk/mmz4281/2425/IRL.csv",  # Ireland Premier
+    "NOR": "https://www.football-data.co.uk/mmz4281/2425/NOR.csv",  # Norway Eliteserien
+    "POL": "https://www.football-data.co.uk/mmz4281/2425/POL.csv",  # Poland Ekstraklasa
+    "ROU": "https://www.football-data.co.uk/mmz4281/2425/ROU.csv",  # Romania Liga 1
+    "RUS": "https://www.football-data.co.uk/mmz4281/2425/RUS.csv",  # Russia Premier
+    "SWE": "https://www.football-data.co.uk/mmz4281/2425/SWE.csv",  # Sweden Allsvenskan
+    "SWZ": "https://www.football-data.co.uk/mmz4281/2425/SWZ.csv",  # Switzerland Super League
+    # Americas
+    "ARG": "https://www.football-data.co.uk/mmz4281/2425/ARG.csv",  # Argentina Primera
+    "BRA": "https://www.football-data.co.uk/mmz4281/2425/BRA.csv",  # Brazil Serie A
+    "MEX": "https://www.football-data.co.uk/mmz4281/2425/MEX.csv",  # Mexico Liga MX
+    "USA": "https://www.football-data.co.uk/mmz4281/2425/USA.csv",  # USA MLS
+    # Asia
+    "CHN": "https://www.football-data.co.uk/mmz4281/2425/CHN.csv",  # China Super League
+    "JPN": "https://www.football-data.co.uk/mmz4281/2425/JPN.csv",  # Japan J-League
+}
+
+# League tiers - Tier 1 = top division, Tier 2 = second division
+# Higher tiers are more predictable and get priority
+LEAGUE_TIERS = {
+    # Tier 1 - Top divisions (most data, most predictable)
+    "E0": 1, "SP1": 1, "D1": 1, "I1": 1, "F1": 1,  # Big 5
+    "P1": 1, "N1": 1, "B1": 1, "T1": 1, "G1": 1,  # Other top European
+    "SC0": 1, "A1": 1,  # Scotland/Austria top
+    "ARG": 1, "BRA": 1, "MEX": 1, "USA": 1,  # Americas top
+    "JPN": 1, "CHN": 1,  # Asia top
+    "DNK": 1, "NOR": 1, "SWE": 1, "SWZ": 1, "POL": 1, "ROU": 1, "RUS": 1, "FIN": 1, "IRL": 1,
+    # Tier 2 - Second divisions
+    "E1": 2, "SP2": 2, "D2": 2, "I2": 2, "F2": 2,  # Big 5 second tier
+    "SC1": 2,  # Scottish Championship
+    # Tier 3 - Third divisions and below
+    "E2": 3, "E3": 3, "EC": 3,  # English lower leagues
+    "SC2": 3, "SC3": 3,  # Scottish lower leagues
 }
 
 # Map common league names to codes
@@ -186,6 +226,61 @@ class TeamStats:
     def total_goals_against(self) -> int:
         """Total goals conceded."""
         return self.home_goals_against + self.away_goals_against
+
+    @property
+    def home_win_rate(self) -> float:
+        """Win rate at home (0.0 to 1.0)."""
+        return self.home_wins / self.home_played if self.home_played > 0 else 0.0
+
+    @property
+    def away_win_rate(self) -> float:
+        """Win rate away (0.0 to 1.0)."""
+        return self.away_wins / self.away_played if self.away_played > 0 else 0.0
+
+    @property
+    def home_unbeaten_rate(self) -> float:
+        """Rate of not losing at home (wins + draws)."""
+        if self.home_played == 0:
+            return 0.0
+        return (self.home_wins + self.home_draws) / self.home_played
+
+    @property
+    def away_unbeaten_rate(self) -> float:
+        """Rate of not losing away (wins + draws)."""
+        if self.away_played == 0:
+            return 0.0
+        return (self.away_wins + self.away_draws) / self.away_played
+
+    @property
+    def total_wins(self) -> int:
+        """Total wins across home and away."""
+        return self.home_wins + self.away_wins
+
+    @property
+    def total_losses(self) -> int:
+        """Total losses across home and away."""
+        return self.home_losses + self.away_losses
+
+    @property
+    def overall_win_rate(self) -> float:
+        """Overall win rate across all games."""
+        return self.total_wins / self.matches_played if self.matches_played > 0 else 0.0
+
+    def is_in_good_home_form(self, min_win_rate: float = 0.3, min_games: int = 3) -> bool:
+        """Check if team is in good home form."""
+        if self.home_played < min_games:
+            return False
+        return self.home_win_rate >= min_win_rate
+
+    def is_in_good_away_form(self, min_win_rate: float = 0.2, min_games: int = 3) -> bool:
+        """Check if team is in good away form."""
+        if self.away_played < min_games:
+            return False
+        return self.away_win_rate >= min_win_rate
+
+    def has_won_at_least_one_away(self) -> bool:
+        """Check if team has won at least one away game."""
+        return self.away_wins >= 1
 
 
 @dataclass

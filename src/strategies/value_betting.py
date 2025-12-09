@@ -281,14 +281,28 @@ class ValueBettingStrategy(BaseStrategy):
     # Minimum games required for reliable team statistics
     MIN_TEAM_GAMES = 5
 
+    # Form filter settings
+    MIN_HOME_WIN_RATE = 0.25  # Home team must win at least 25% at home
+    MIN_AWAY_WIN_RATE = 0.15  # Away team must win at least 15% away
+    REQUIRE_AWAY_WIN = True   # Away team must have won at least 1 away game
+
+    # League tier settings (1 = top, 2 = second division, 3+ = lower)
+    MAX_LEAGUE_TIER = 2  # Only bet on tier 1 and 2 leagues
+
+    # Draw exclusion - we have LTD strategy for draws
+    EXCLUDE_DRAWS = True
+
     async def _generate_football_poisson_probs(self, market: Market) -> None:
         """
         Generate probabilities using Poisson model with real team data.
+
+        Applies form-based filters and league tier restrictions.
 
         Args:
             market: Football Match Odds market
         """
         from src.strategies.models.poisson import FootballPoissonModel
+        from src.data.football_data import LEAGUE_TIERS
 
         # Get the football data service
         data_service = await get_football_data_service()
@@ -315,6 +329,17 @@ class ValueBettingStrategy(BaseStrategy):
 
         home_stats, away_stats, league_stats = match_stats
 
+        # Filter: League tier check
+        league_tier = LEAGUE_TIERS.get(league_stats.league_code, 99)
+        if league_tier > self.MAX_LEAGUE_TIER:
+            logger.debug(
+                "Skipping - league tier too low",
+                league=league_stats.league_code,
+                tier=league_tier,
+                max_tier=self.MAX_LEAGUE_TIER,
+            )
+            return
+
         # Filter: Teams must have minimum games for reliable statistics
         if home_stats.matches_played < self.MIN_TEAM_GAMES or away_stats.matches_played < self.MIN_TEAM_GAMES:
             logger.debug(
@@ -322,6 +347,35 @@ class ValueBettingStrategy(BaseStrategy):
                 home_games=home_stats.matches_played,
                 away_games=away_stats.matches_played,
                 min_required=self.MIN_TEAM_GAMES,
+            )
+            return
+
+        # Filter: Home team form check
+        if home_stats.home_played >= 3 and home_stats.home_win_rate < self.MIN_HOME_WIN_RATE:
+            logger.debug(
+                "Skipping - home team poor home form",
+                home=home_team,
+                home_win_rate=f"{home_stats.home_win_rate:.1%}",
+                min_required=f"{self.MIN_HOME_WIN_RATE:.1%}",
+            )
+            return
+
+        # Filter: Away team form check
+        if away_stats.away_played >= 3 and away_stats.away_win_rate < self.MIN_AWAY_WIN_RATE:
+            logger.debug(
+                "Skipping - away team poor away form",
+                away=away_team,
+                away_win_rate=f"{away_stats.away_win_rate:.1%}",
+                min_required=f"{self.MIN_AWAY_WIN_RATE:.1%}",
+            )
+            return
+
+        # Filter: Away team must have won at least one away game
+        if self.REQUIRE_AWAY_WIN and not away_stats.has_won_at_least_one_away():
+            logger.debug(
+                "Skipping - away team has no away wins",
+                away=away_team,
+                away_wins=away_stats.away_wins,
             )
             return
 
@@ -350,15 +404,22 @@ class ValueBettingStrategy(BaseStrategy):
             home_xg=f"{prediction.expected_home_goals:.2f}",
             away_xg=f"{prediction.expected_away_goals:.2f}",
             league=league_stats.league_code,
+            tier=league_tier,
+            home_form=f"{home_stats.home_win_rate:.0%}",
+            away_form=f"{away_stats.away_win_rate:.0%}",
         )
 
         # Map predictions to runner selection IDs
+        # EXCLUDE DRAWS - we have lay_the_draw strategy for that
         self._model_probabilities = {}
         for runner in market.runners:
             runner_name = runner.name.lower()
 
             if "draw" in runner_name or runner_name == "the draw":
-                self._model_probabilities[runner.selection_id] = prediction.draw_prob
+                # Skip draws if excluded - don't add to model probabilities
+                if not self.EXCLUDE_DRAWS:
+                    self._model_probabilities[runner.selection_id] = prediction.draw_prob
+                # else: draw is excluded, no probability set = won't be bet on
             elif self._is_home_team(runner.name, home_team, market):
                 self._model_probabilities[runner.selection_id] = prediction.home_win_prob
             else:

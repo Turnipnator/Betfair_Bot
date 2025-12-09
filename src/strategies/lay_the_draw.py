@@ -88,7 +88,7 @@ class LayTheDrawStrategy(BaseStrategy):
     def __init__(
         self,
         min_draw_odds: float = 3.0,
-        max_draw_odds: float = 3.25,  # Narrowed from 4.0 to reduce liability on losses
+        max_draw_odds: float = 3.5,  # Widened from 3.25 for more opportunities
         min_market_volume: float = 0.0,  # Disabled for paper trading - no volume filter
         cut_loss_minute: int = 70,
         min_profit_percent: float = 0.5,

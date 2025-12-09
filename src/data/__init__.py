@@ -3,6 +3,7 @@
 from src.data.football_data import (
     FootballDataService,
     LeagueStats,
+    MatchResult,
     TeamStats,
     football_data_service,
     LEAGUE_URLS,
@@ -12,6 +13,7 @@ from src.data.football_data import (
 __all__ = [
     "FootballDataService",
     "LeagueStats",
+    "MatchResult",
     "TeamStats",
     "football_data_service",
     "LEAGUE_URLS",

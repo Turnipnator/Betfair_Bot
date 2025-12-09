@@ -505,14 +505,14 @@ class PaperTradingEngine:
 
     async def settle_stale_bets(self) -> None:
         """
-        Settle bets that are too old to get market data for.
+        Settle bets using REAL match results from football-data.co.uk.
 
-        For paper trading, we simulate results based on odds:
-        - Implied probability determines win chance
-        - This provides realistic win/loss distribution
+        Only settles football bets where we can find actual results.
+        Bets without results are left open until results become available.
         """
-        import random
         from datetime import datetime, timedelta
+        from src.data.football_data import football_data_service
+        from src.models import Sport
 
         if not self._simulator:
             return
@@ -522,7 +522,7 @@ class PaperTradingEngine:
             if not open_bets:
                 return
 
-            # Threshold: bets placed more than 4 hours ago
+            # Threshold: bets placed more than 4 hours ago (match should be finished)
             stale_threshold = datetime.utcnow() - timedelta(hours=4)
             stale_bets = [b for b in open_bets if b.placed_at < stale_threshold]
 
@@ -530,22 +530,74 @@ class PaperTradingEngine:
                 return
 
             logger.info(
-                "Settling stale bets",
+                "Checking stale bets for real results",
                 count=len(stale_bets),
                 threshold="4 hours",
             )
 
-            for bet in stale_bets:
-                # Simulate result based on odds (implied probability)
-                # At odds of 2.0, implied prob is 50% = 50% win rate
-                # At odds of 5.0, implied prob is 20% = 20% win rate
-                implied_prob = 1.0 / bet.matched_odds if bet.matched_odds > 0 else 0.5
-                selection_won = random.random() < implied_prob
+            settled_count = 0
+            skipped_count = 0
 
+            for bet in stale_bets:
+                # Get event name from database to look up result
+                event_name = None
+                try:
+                    async with db.session() as session:
+                        market_repo = MarketRepository(session)
+                        market = await market_repo.get(bet.market_id)
+                        if market:
+                            event_name = market.event_name
+                except Exception:
+                    pass
+
+                if not event_name:
+                    logger.debug(
+                        "Skipping stale bet - no event name",
+                        bet_id=bet.bet_ref,
+                        selection=bet.selection_name[:30] if bet.selection_name else "N/A",
+                    )
+                    skipped_count += 1
+                    continue
+
+                # Look up real result from football-data.co.uk
+                result_data = await football_data_service.get_match_result_by_selection(
+                    selection_name=bet.selection_name,
+                    event_name=event_name,
+                    bet_placed_at=bet.placed_at,
+                )
+
+                if not result_data:
+                    # Result not found - could be:
+                    # 1. Match not yet in football-data (they update daily)
+                    # 2. Horse racing (not supported)
+                    # 3. Match name doesn't match
+                    logger.debug(
+                        "No result found for stale bet - will retry later",
+                        bet_id=bet.bet_ref,
+                        event=event_name,
+                        selection=bet.selection_name[:30] if bet.selection_name else "N/A",
+                    )
+                    skipped_count += 1
+                    continue
+
+                match_result, selection_type = result_data
+
+                # Determine if our selection won based on bet type and result
+                if bet.bet_type == BetType.BACK:
+                    # We backed this selection - did it win?
+                    selection_won = match_result.winner == selection_type
+                else:
+                    # We laid this selection (e.g., lay the draw) - did it LOSE?
+                    # For LAY bets, we win if the selection LOSES
+                    selection_won = match_result.winner != selection_type
+
+                # Settle the bet with real result
                 success, pnl = self._simulator.settle_bet(bet.id, selection_won)
 
                 if success:
-                    # Remove from tracking (market is now available for new bets)
+                    settled_count += 1
+
+                    # Remove from tracking
                     if bet.strategy in self._markets_with_bets:
                         self._markets_with_bets[bet.strategy].discard(bet.market_id)
 
@@ -565,15 +617,25 @@ class PaperTradingEngine:
                                 )
                                 await session.commit()
                     except Exception as db_error:
-                        logger.warning("Failed to update DB for stale bet", error=str(db_error)[:100])
+                        logger.warning("Failed to update DB for settled bet", error=str(db_error)[:100])
 
                     logger.info(
-                        "Stale bet settled (simulated)",
-                        selection=bet.selection_name[:20],
-                        odds=f"{bet.matched_odds:.2f}",
+                        "Bet settled with REAL result",
+                        selection=bet.selection_name[:25] if bet.selection_name else "N/A",
+                        event=event_name[:30] if event_name else "N/A",
+                        score=f"{match_result.home_goals}-{match_result.away_goals}",
+                        bet_type=bet.bet_type.value,
                         result="WIN" if selection_won else "LOSS",
                         pnl=f"£{pnl:+.2f}",
                     )
+
+            if settled_count > 0 or skipped_count > 0:
+                logger.info(
+                    "Stale bet settlement complete",
+                    settled=settled_count,
+                    skipped=skipped_count,
+                    reason="Results not yet available" if skipped_count > 0 else "",
+                )
 
         except Exception as e:
             logger.error("Error settling stale bets", error=str(e))

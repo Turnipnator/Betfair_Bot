@@ -110,6 +110,31 @@ LEAGUE_NAME_MAP = {
 
 
 @dataclass
+class MatchResult:
+    """Result of a completed match."""
+
+    home_team: str
+    away_team: str
+    home_goals: int
+    away_goals: int
+    match_date: Optional[datetime] = None
+
+    @property
+    def winner(self) -> str:
+        """Return 'home', 'away', or 'draw'."""
+        if self.home_goals > self.away_goals:
+            return "home"
+        elif self.away_goals > self.home_goals:
+            return "away"
+        return "draw"
+
+    @property
+    def total_goals(self) -> int:
+        """Total goals scored in the match."""
+        return self.home_goals + self.away_goals
+
+
+@dataclass
 class TeamStats:
     """Statistics for a single team."""
 
@@ -169,6 +194,7 @@ class LeagueStats:
 
     league_code: str
     teams: dict[str, TeamStats] = field(default_factory=dict)
+    match_results: list[MatchResult] = field(default_factory=list)  # All match results
     total_matches: int = 0
     total_home_goals: int = 0
     total_away_goals: int = 0
@@ -433,6 +459,27 @@ class FootballDataService:
                     if not home_team or not away_team:
                         continue
 
+                    # Parse match date
+                    match_date = None
+                    date_str = row.get("Date", "")
+                    if date_str:
+                        for fmt in ["%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d"]:
+                            try:
+                                match_date = datetime.strptime(date_str, fmt)
+                                break
+                            except ValueError:
+                                continue
+
+                    # Store the match result
+                    match_result = MatchResult(
+                        home_team=home_team,
+                        away_team=away_team,
+                        home_goals=home_goals,
+                        away_goals=away_goals,
+                        match_date=match_date,
+                    )
+                    league_stats.match_results.append(match_result)
+
                     # Update league totals
                     league_stats.total_matches += 1
                     league_stats.total_home_goals += home_goals
@@ -628,6 +675,156 @@ class FootballDataService:
             # If most teams found, likely this league
             if matches >= len(team_names) * 0.5:
                 return league_code
+
+        return None
+
+    async def get_match_result(
+        self,
+        home_team: str,
+        away_team: str,
+        match_date: Optional[datetime] = None,
+        date_tolerance_days: int = 3,
+    ) -> Optional[MatchResult]:
+        """
+        Look up the actual result of a completed match.
+
+        Args:
+            home_team: Home team name (will be normalized)
+            away_team: Away team name (will be normalized)
+            match_date: Approximate match date (optional but recommended)
+            date_tolerance_days: How many days either side to search
+
+        Returns:
+            MatchResult if found, None otherwise
+        """
+        normalized_home = self._normalize_team_name(home_team)
+        normalized_away = self._normalize_team_name(away_team)
+
+        logger.debug(
+            "Looking up match result",
+            home=home_team,
+            away=away_team,
+            normalized_home=normalized_home,
+            normalized_away=normalized_away,
+            date=match_date.isoformat() if match_date else "N/A",
+        )
+
+        # Search all leagues (refresh data to get latest results)
+        for league_code in LEAGUE_URLS.keys():
+            # Force refresh to get latest results (cache only 1 hour for result lookups)
+            league = await self.get_league_stats(league_code, force_refresh=False)
+            if not league or not league.match_results:
+                continue
+
+            # Search through match results
+            for result in league.match_results:
+                result_home = self._normalize_team_name(result.home_team)
+                result_away = self._normalize_team_name(result.away_team)
+
+                # Check if teams match
+                if result_home != normalized_home or result_away != normalized_away:
+                    continue
+
+                # If we have a date, check it's within tolerance
+                if match_date and result.match_date:
+                    date_diff = abs((result.match_date - match_date).days)
+                    if date_diff > date_tolerance_days:
+                        continue
+
+                logger.info(
+                    "Found match result",
+                    home=result.home_team,
+                    away=result.away_team,
+                    score=f"{result.home_goals}-{result.away_goals}",
+                    winner=result.winner,
+                    league=league_code,
+                )
+                return result
+
+        logger.debug(
+            "Match result not found",
+            home=home_team,
+            away=away_team,
+        )
+        return None
+
+    async def get_match_result_by_selection(
+        self,
+        selection_name: str,
+        event_name: str,
+        bet_placed_at: Optional[datetime] = None,
+    ) -> Optional[tuple[MatchResult, str]]:
+        """
+        Look up match result using Betfair selection/event names.
+
+        Args:
+            selection_name: The selection that was bet on (e.g., "Arsenal", "Draw", "The Draw")
+            event_name: The event name (e.g., "Arsenal v Chelsea")
+            bet_placed_at: When the bet was placed (to estimate match date)
+
+        Returns:
+            Tuple of (MatchResult, selection_type) where selection_type is 'home', 'away', or 'draw'
+            None if result not found
+        """
+        # Parse teams from event name (format: "Home v Away" or "Home vs Away")
+        event_lower = event_name.lower()
+        separator = " v " if " v " in event_lower else " vs "
+
+        parts = event_name.split(separator if separator in event_name else " v ")
+        if len(parts) != 2:
+            # Try alternate separators
+            for sep in [" v ", " vs ", " - "]:
+                parts = event_name.split(sep)
+                if len(parts) == 2:
+                    break
+
+        if len(parts) != 2:
+            logger.warning("Could not parse teams from event name", event=event_name)
+            return None
+
+        home_team = parts[0].strip()
+        away_team = parts[1].strip()
+
+        # Determine what was bet on
+        selection_lower = selection_name.lower().strip()
+        home_lower = home_team.lower()
+        away_lower = away_team.lower()
+
+        if selection_lower in ["draw", "the draw"]:
+            selection_type = "draw"
+        elif selection_lower == home_lower or self._normalize_team_name(selection_name) == self._normalize_team_name(home_team):
+            selection_type = "home"
+        elif selection_lower == away_lower or self._normalize_team_name(selection_name) == self._normalize_team_name(away_team):
+            selection_type = "away"
+        else:
+            # Try fuzzy matching
+            norm_selection = self._normalize_team_name(selection_name)
+            norm_home = self._normalize_team_name(home_team)
+            norm_away = self._normalize_team_name(away_team)
+
+            if norm_selection == norm_home:
+                selection_type = "home"
+            elif norm_selection == norm_away:
+                selection_type = "away"
+            else:
+                logger.warning(
+                    "Could not determine selection type",
+                    selection=selection_name,
+                    home=home_team,
+                    away=away_team,
+                )
+                return None
+
+        # Look up the result
+        result = await self.get_match_result(
+            home_team=home_team,
+            away_team=away_team,
+            match_date=bet_placed_at,
+            date_tolerance_days=5,  # More tolerance for stale bets
+        )
+
+        if result:
+            return (result, selection_type)
 
         return None
 

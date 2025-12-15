@@ -110,6 +110,7 @@ class TradingBot:
             handle_report,
             handle_start,
             handle_start_trading,
+            handle_stats,
             handle_status,
             handle_stop,
             handle_toggle,
@@ -130,6 +131,7 @@ class TradingBot:
         # Information
         self._app.add_handler(CommandHandler("positions", handle_positions))
         self._app.add_handler(CommandHandler("performance", handle_performance))
+        self._app.add_handler(CommandHandler("stats", handle_stats))
         self._app.add_handler(CommandHandler("report", handle_report))
         self._app.add_handler(CommandHandler("daily", handle_daily))
         self._app.add_handler(CommandHandler("weekly", handle_weekly))

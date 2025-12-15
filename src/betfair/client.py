@@ -54,6 +54,18 @@ class BetfairClient:
         """Check if we're logged into Betfair."""
         return self._logged_in and self._client is not None
 
+    @property
+    def api_client(self) -> Optional[APIClient]:
+        """
+        Get the underlying betfairlightweight API client.
+
+        Used for streaming API access which requires direct client access.
+
+        Returns:
+            The betfairlightweight APIClient or None if not logged in.
+        """
+        return self._client if self._logged_in else None
+
     async def login(self) -> bool:
         """
         Authenticate with Betfair API.

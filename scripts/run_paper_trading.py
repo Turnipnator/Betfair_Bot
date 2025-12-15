@@ -34,7 +34,10 @@ from src.strategies import (
 )
 from src.telegram_bot import telegram_bot, notifier
 from src.reporting import report_generator, daily_report_generator
-from src.utils import calculate_stake
+from src.utils import calculate_stake, calculate_kelly_stake
+from src.data.football_data import football_data_service
+from src.streaming.stream_manager import StreamManager
+from src.streaming.ltd_monitor import LTDStreamMonitor
 
 logger = get_logger(__name__)
 
@@ -60,6 +63,10 @@ class PaperTradingEngine:
 
         # Track markets with open bets to prevent duplicates
         self._markets_with_bets: dict[str, set[str]] = {}  # strategy -> set of market_ids
+
+        # Streaming components for LTD in-play management
+        self._stream_manager: Optional[StreamManager] = None
+        self._ltd_monitor: Optional[LTDStreamMonitor] = None
 
         # Daily stats
         self._markets_scanned = 0
@@ -165,6 +172,20 @@ class PaperTradingEngine:
             if not success:
                 logger.warning("Failed to login to Betfair - running without live market data")
                 # Continue without Betfair - useful for testing infrastructure
+            else:
+                # Initialize streaming components if enabled
+                if settings.streaming.enabled and betfair_client.api_client:
+                    self._stream_manager = StreamManager(
+                        betfair_client=betfair_client.api_client,
+                        conflate_ms=settings.streaming.conflate_ms,
+                        heartbeat_ms=settings.streaming.heartbeat_ms,
+                    )
+                    self._ltd_monitor = LTDStreamMonitor(
+                        stream_manager=self._stream_manager,
+                        on_hedge_signal=self._handle_ltd_hedge,
+                        goal_threshold=settings.streaming.goal_threshold,
+                    )
+                    logger.info("Streaming components initialized for LTD in-play management")
         else:
             logger.warning("Betfair not configured - using simulated markets")
 
@@ -206,6 +227,85 @@ class PaperTradingEngine:
             odds=0.0,
             strategy="arbitrage",
         )
+
+    async def _handle_ltd_hedge(self, signal: BetSignal) -> None:
+        """
+        Handle LTD hedge signal from streaming monitor.
+
+        Called when a goal is detected and we need to place a hedge bet
+        to lock in profit on an open LTD position.
+        """
+        logger.info(
+            "Processing LTD hedge signal from streaming",
+            market_id=signal.market_id,
+            match=signal.event_name,
+            hedge_odds=signal.odds,
+            hedge_stake=signal.stake,
+        )
+
+        # Process the hedge bet through normal signal flow
+        await self.process_signal(signal)
+
+        # Send special notification for streaming hedge
+        await notifier.bet_placed(
+            Bet(
+                id=0,
+                bet_ref=f"HEDGE_{signal.market_id[:8]}",
+                market_id=signal.market_id,
+                selection_id=signal.selection_id,
+                selection_name=signal.selection_name,
+                strategy=signal.strategy,
+                bet_type=signal.bet_type,
+                requested_odds=signal.odds,
+                matched_odds=signal.odds,
+                stake=signal.stake,
+                potential_profit=signal.stake * (signal.odds - 1),
+                potential_loss=signal.stake,
+                status=BetStatus.MATCHED,
+                is_paper=True,
+                placed_at=datetime.utcnow(),
+            )
+        )
+
+    async def _subscribe_open_ltd_positions(self) -> None:
+        """Subscribe to streaming for any open LTD positions from previous runs."""
+        if not self._ltd_monitor or not self._simulator:
+            return
+
+        try:
+            open_bets = self._simulator.get_open_bets()
+            ltd_bets = [b for b in open_bets if b.strategy == "lay_the_draw"]
+
+            if not ltd_bets:
+                return
+
+            logger.info(
+                "Subscribing to existing LTD positions",
+                count=len(ltd_bets),
+            )
+
+            for bet in ltd_bets:
+                # Get event name from database
+                event_name = "Unknown"
+                try:
+                    async with db.session() as session:
+                        market_repo = MarketRepository(session)
+                        market = await market_repo.get(bet.market_id)
+                        if market:
+                            event_name = market.event_name
+                except Exception:
+                    pass
+
+                await self._ltd_monitor.add_position(
+                    market_id=bet.market_id,
+                    selection_id=bet.selection_id,
+                    entry_odds=bet.matched_odds,
+                    entry_stake=bet.stake,
+                    event_name=event_name,
+                )
+
+        except Exception as e:
+            logger.error("Error subscribing to open LTD positions", error=str(e))
 
     async def start(self) -> None:
         """Start the trading engine."""
@@ -277,6 +377,14 @@ class PaperTradingEngine:
 
         self._scheduler.start()
 
+        # Start LTD streaming monitor (lazy connect - will connect when first position added)
+        if self._stream_manager and self._ltd_monitor:
+            await self._ltd_monitor.start()
+            logger.info("LTD streaming monitor started (will connect on first position)")
+
+            # Subscribe to any existing open LTD bets (this will trigger lazy connect)
+            await self._subscribe_open_ltd_positions()
+
         # Immediately settle any stale bets from previous runs
         await self.settle_stale_bets()
 
@@ -299,6 +407,12 @@ class PaperTradingEngine:
         logger.info("Stopping paper trading engine...")
         self._running = False
         telegram_bot.set_trading_active(False)
+
+        # Stop streaming
+        if self._ltd_monitor:
+            await self._ltd_monitor.stop()
+        if self._stream_manager:
+            await self._stream_manager.disconnect()
 
         if self._scheduler:
             self._scheduler.shutdown(wait=False)
@@ -574,7 +688,7 @@ class PaperTradingEngine:
                     logger.debug(
                         "No result found for stale bet - will retry later",
                         bet_id=bet.bet_ref,
-                        event=event_name,
+                        match=event_name,
                         selection=bet.selection_name[:30] if bet.selection_name else "N/A",
                     )
                     skipped_count += 1
@@ -622,10 +736,10 @@ class PaperTradingEngine:
                     logger.info(
                         "Bet settled with REAL result",
                         selection=bet.selection_name[:25] if bet.selection_name else "N/A",
-                        event=event_name[:30] if event_name else "N/A",
+                        match=event_name[:30] if event_name else "N/A",
                         score=f"{match_result.home_goals}-{match_result.away_goals}",
                         bet_type=bet.bet_type.value,
-                        result="WIN" if selection_won else "LOSS",
+                        outcome="WIN" if selection_won else "LOSS",
                         pnl=f"£{pnl:+.2f}",
                     )
 
@@ -675,9 +789,41 @@ class PaperTradingEngine:
             except Exception as db_err:
                 logger.warning("DB check failed, proceeding with bet", error=str(db_err)[:50])
 
+            # Check if match is covered by football-data.co.uk (for settlement)
+            # Only applies to football markets
+            if signal.sport and signal.sport.value == "football" and signal.event_name:
+                # Parse home/away teams from event name (format: "Home v Away")
+                if " v " in signal.event_name:
+                    parts = signal.event_name.split(" v ")
+                    if len(parts) == 2:
+                        home_team, away_team = parts[0].strip(), parts[1].strip()
+                        is_covered = await football_data_service.is_match_covered(home_team, away_team)
+                        if not is_covered:
+                            logger.info(
+                                "Signal rejected - match not covered by football-data.co.uk",
+                                event=signal.event_name,
+                                strategy=signal.strategy,
+                            )
+                            return
+
             # Calculate stake if not set
             if signal.stake <= 0:
-                signal.stake = calculate_stake(self._simulator.available_balance)
+                # Use Kelly staking for value betting with edge data
+                if signal.strategy == "value_betting" and signal.edge and signal.edge > 0:
+                    signal.stake = calculate_kelly_stake(
+                        bankroll=self._simulator.available_balance,
+                        edge=signal.edge,
+                        odds=signal.odds,
+                    )
+                    logger.info(
+                        "Kelly stake calculated",
+                        edge=f"{signal.edge:.1%}",
+                        odds=f"{signal.odds:.2f}",
+                        stake=f"£{signal.stake:.2f}",
+                    )
+                else:
+                    # Fall back to flat percentage staking
+                    signal.stake = calculate_stake(self._simulator.available_balance)
 
             # Place through simulator (includes risk checks)
             success, message, bet = self._simulator.place_order(signal)
@@ -742,6 +888,21 @@ class PaperTradingEngine:
                         if hasattr(strategy, "record_bet_placed"):
                             strategy.record_bet_placed()
                         break
+
+                # Add to streaming monitor for LTD positions
+                if signal.strategy == "lay_the_draw" and self._ltd_monitor:
+                    await self._ltd_monitor.add_position(
+                        market_id=signal.market_id,
+                        selection_id=signal.selection_id,
+                        entry_odds=bet.matched_odds,
+                        entry_stake=bet.stake,
+                        event_name=signal.event_name or "Unknown",
+                    )
+                    logger.info(
+                        "Added LTD position to streaming monitor",
+                        market_id=signal.market_id,
+                        event=signal.event_name,
+                    )
             else:
                 logger.debug(
                     "Signal rejected",

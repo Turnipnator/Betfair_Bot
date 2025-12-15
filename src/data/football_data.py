@@ -18,60 +18,41 @@ from config.logging_config import get_logger
 logger = get_logger(__name__)
 
 
-# Football-data.co.uk CSV URLs for current season (2024-25)
+# Football-data.co.uk CSV URLs for current season (2025-26)
 LEAGUE_URLS = {
     # England
-    "E0": "https://www.football-data.co.uk/mmz4281/2425/E0.csv",  # Premier League
-    "E1": "https://www.football-data.co.uk/mmz4281/2425/E1.csv",  # Championship
-    "E2": "https://www.football-data.co.uk/mmz4281/2425/E2.csv",  # League One
-    "E3": "https://www.football-data.co.uk/mmz4281/2425/E3.csv",  # League Two
-    "EC": "https://www.football-data.co.uk/mmz4281/2425/EC.csv",  # Conference
+    "E0": "https://www.football-data.co.uk/mmz4281/2526/E0.csv",  # Premier League
+    "E1": "https://www.football-data.co.uk/mmz4281/2526/E1.csv",  # Championship
+    "E2": "https://www.football-data.co.uk/mmz4281/2526/E2.csv",  # League One
+    "E3": "https://www.football-data.co.uk/mmz4281/2526/E3.csv",  # League Two
+    "EC": "https://www.football-data.co.uk/mmz4281/2526/EC.csv",  # Conference
     # Scotland
-    "SC0": "https://www.football-data.co.uk/mmz4281/2425/SC0.csv",  # Scottish Premiership
-    "SC1": "https://www.football-data.co.uk/mmz4281/2425/SC1.csv",  # Scottish Championship
-    "SC2": "https://www.football-data.co.uk/mmz4281/2425/SC2.csv",  # Scottish League One
-    "SC3": "https://www.football-data.co.uk/mmz4281/2425/SC3.csv",  # Scottish League Two
+    "SC0": "https://www.football-data.co.uk/mmz4281/2526/SC0.csv",  # Scottish Premiership
+    "SC1": "https://www.football-data.co.uk/mmz4281/2526/SC1.csv",  # Scottish Championship
+    "SC2": "https://www.football-data.co.uk/mmz4281/2526/SC2.csv",  # Scottish League One
+    "SC3": "https://www.football-data.co.uk/mmz4281/2526/SC3.csv",  # Scottish League Two
     # Spain
-    "SP1": "https://www.football-data.co.uk/mmz4281/2425/SP1.csv",  # La Liga
-    "SP2": "https://www.football-data.co.uk/mmz4281/2425/SP2.csv",  # Segunda División
+    "SP1": "https://www.football-data.co.uk/mmz4281/2526/SP1.csv",  # La Liga
+    "SP2": "https://www.football-data.co.uk/mmz4281/2526/SP2.csv",  # Segunda División
     # Germany
-    "D1": "https://www.football-data.co.uk/mmz4281/2425/D1.csv",  # Bundesliga
-    "D2": "https://www.football-data.co.uk/mmz4281/2425/D2.csv",  # 2. Bundesliga
+    "D1": "https://www.football-data.co.uk/mmz4281/2526/D1.csv",  # Bundesliga
+    "D2": "https://www.football-data.co.uk/mmz4281/2526/D2.csv",  # 2. Bundesliga
     # Italy
-    "I1": "https://www.football-data.co.uk/mmz4281/2425/I1.csv",  # Serie A
-    "I2": "https://www.football-data.co.uk/mmz4281/2425/I2.csv",  # Serie B
+    "I1": "https://www.football-data.co.uk/mmz4281/2526/I1.csv",  # Serie A
+    "I2": "https://www.football-data.co.uk/mmz4281/2526/I2.csv",  # Serie B
     # France
-    "F1": "https://www.football-data.co.uk/mmz4281/2425/F1.csv",  # Ligue 1
-    "F2": "https://www.football-data.co.uk/mmz4281/2425/F2.csv",  # Ligue 2
+    "F1": "https://www.football-data.co.uk/mmz4281/2526/F1.csv",  # Ligue 1
+    "F2": "https://www.football-data.co.uk/mmz4281/2526/F2.csv",  # Ligue 2
     # Portugal
-    "P1": "https://www.football-data.co.uk/mmz4281/2425/P1.csv",  # Primeira Liga
+    "P1": "https://www.football-data.co.uk/mmz4281/2526/P1.csv",  # Primeira Liga
     # Netherlands
-    "N1": "https://www.football-data.co.uk/mmz4281/2425/N1.csv",  # Eredivisie
+    "N1": "https://www.football-data.co.uk/mmz4281/2526/N1.csv",  # Eredivisie
     # Belgium
-    "B1": "https://www.football-data.co.uk/mmz4281/2425/B1.csv",  # Jupiler Pro League
+    "B1": "https://www.football-data.co.uk/mmz4281/2526/B1.csv",  # Jupiler Pro League
     # Turkey
-    "T1": "https://www.football-data.co.uk/mmz4281/2425/T1.csv",  # Süper Lig
+    "T1": "https://www.football-data.co.uk/mmz4281/2526/T1.csv",  # Süper Lig
     # Greece
-    "G1": "https://www.football-data.co.uk/mmz4281/2425/G1.csv",  # Super League Greece
-    # Additional European leagues
-    "A1": "https://www.football-data.co.uk/mmz4281/2425/A1.csv",  # Austria Bundesliga
-    "DNK": "https://www.football-data.co.uk/mmz4281/2425/DNK.csv",  # Denmark Superliga
-    "FIN": "https://www.football-data.co.uk/mmz4281/2425/FIN.csv",  # Finland Veikkausliiga
-    "IRL": "https://www.football-data.co.uk/mmz4281/2425/IRL.csv",  # Ireland Premier
-    "NOR": "https://www.football-data.co.uk/mmz4281/2425/NOR.csv",  # Norway Eliteserien
-    "POL": "https://www.football-data.co.uk/mmz4281/2425/POL.csv",  # Poland Ekstraklasa
-    "ROU": "https://www.football-data.co.uk/mmz4281/2425/ROU.csv",  # Romania Liga 1
-    "RUS": "https://www.football-data.co.uk/mmz4281/2425/RUS.csv",  # Russia Premier
-    "SWE": "https://www.football-data.co.uk/mmz4281/2425/SWE.csv",  # Sweden Allsvenskan
-    "SWZ": "https://www.football-data.co.uk/mmz4281/2425/SWZ.csv",  # Switzerland Super League
-    # Americas
-    "ARG": "https://www.football-data.co.uk/mmz4281/2425/ARG.csv",  # Argentina Primera
-    "BRA": "https://www.football-data.co.uk/mmz4281/2425/BRA.csv",  # Brazil Serie A
-    "MEX": "https://www.football-data.co.uk/mmz4281/2425/MEX.csv",  # Mexico Liga MX
-    "USA": "https://www.football-data.co.uk/mmz4281/2425/USA.csv",  # USA MLS
-    # Asia
-    "CHN": "https://www.football-data.co.uk/mmz4281/2425/CHN.csv",  # China Super League
-    "JPN": "https://www.football-data.co.uk/mmz4281/2425/JPN.csv",  # Japan J-League
+    "G1": "https://www.football-data.co.uk/mmz4281/2526/G1.csv",  # Super League Greece
 }
 
 # League tiers - Tier 1 = top division, Tier 2 = second division
@@ -746,6 +727,58 @@ class FootballDataService:
             away=away_team,
         )
         return None
+
+    async def is_match_covered(self, home_team: str, away_team: str) -> bool:
+        """
+        Check if a match is covered by football-data.co.uk.
+
+        This ensures we only bet on matches where we can get real results
+        for settlement. Rejects matches from:
+        - Non-European leagues
+        - Reserve/B teams
+        - Women's football
+        - Uncovered lower leagues
+
+        Args:
+            home_team: Home team name
+            away_team: Away team name
+
+        Returns:
+            True if both teams are found in covered leagues
+        """
+        # Quick rejection for known uncovered patterns
+        uncovered_patterns = [
+            " (w)", "(w)", " women", " ladies",  # Women's football
+            " b ", " b)", " ii", " u21", " u23", " u19",  # Reserve/youth teams
+            " reserves", " b team",
+        ]
+        combined = f"{home_team} {away_team}".lower()
+        for pattern in uncovered_patterns:
+            if pattern in combined:
+                logger.debug(
+                    "Match rejected - uncovered category",
+                    home=home_team,
+                    away=away_team,
+                    pattern=pattern,
+                )
+                return False
+
+        # Check if both teams exist in our data
+        result = await self.get_match_stats(home_team, away_team)
+        if result:
+            logger.debug(
+                "Match is covered",
+                home=home_team,
+                away=away_team,
+            )
+            return True
+
+        logger.debug(
+            "Match not covered - teams not found",
+            home=home_team,
+            away=away_team,
+        )
+        return False
 
     def detect_league_from_teams(self, team_names: list[str]) -> Optional[str]:
         """

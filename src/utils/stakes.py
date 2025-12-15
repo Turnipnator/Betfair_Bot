@@ -178,6 +178,78 @@ def calculate_break_even_odds(original_odds: float, commission: float = COMMISSI
     return effective_odds
 
 
+def calculate_kelly_stake(
+    bankroll: float,
+    edge: float,
+    odds: float,
+    kelly_fraction: float = 0.25,
+    min_stake: Optional[float] = None,
+    max_stake: Optional[float] = None,
+) -> float:
+    """
+    Calculate stake using Kelly Criterion.
+
+    Kelly formula: stake = edge / (odds - 1) * bankroll
+
+    We use fractional Kelly (default 25%) to reduce variance while
+    still betting proportionally to edge. Higher edge = bigger stake.
+
+    Args:
+        bankroll: Current bankroll amount
+        edge: Model edge (model_prob - implied_prob), e.g. 0.20 for 20%
+        odds: Decimal odds
+        kelly_fraction: Fraction of full Kelly to use (0.25 = quarter Kelly)
+        min_stake: Minimum stake (default from settings)
+        max_stake: Maximum stake (default from settings)
+
+    Returns:
+        Calculated stake, rounded to 2 decimal places
+
+    Example:
+        - Bankroll: £500
+        - Edge: 25% (0.25)
+        - Odds: 2.0
+        - Full Kelly: 0.25 / (2.0 - 1) * 500 = £125
+        - Quarter Kelly: £125 * 0.25 = £31.25
+    """
+    # Use settings defaults
+    if min_stake is None:
+        min_stake = max(settings.risk.min_stake_amount, BETFAIR_MIN_STAKE)
+    if max_stake is None:
+        max_stake = settings.risk.max_stake_amount
+
+    # Edge must be positive
+    if edge <= 0:
+        return 0.0
+
+    # Odds must be greater than 1
+    if odds <= 1.0:
+        return 0.0
+
+    # Full Kelly stake
+    full_kelly = (edge / (odds - 1)) * bankroll
+
+    # Apply fractional Kelly
+    stake = full_kelly * kelly_fraction
+
+    # Apply minimum
+    stake = max(stake, min_stake)
+
+    # Apply maximum cap
+    stake = min(stake, max_stake)
+
+    logger.debug(
+        "Kelly stake calculated",
+        edge=f"{edge:.1%}",
+        odds=f"{odds:.2f}",
+        full_kelly=f"£{full_kelly:.2f}",
+        fraction=kelly_fraction,
+        final_stake=f"£{stake:.2f}",
+    )
+
+    return round(stake, 2)
+
+
 def calculate_adjusted_stake(
     base_stake: float,
     confidence: float,

@@ -4,7 +4,7 @@ Telegram command handlers.
 Implements all the /commands for the trading bot.
 """
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -12,6 +12,7 @@ from telegram.ext import ContextTypes
 from config import settings
 from config.logging_config import get_logger
 from src.database import db, BankrollRepository, BetRepository, PerformanceRepository
+from sqlalchemy import text
 
 logger = get_logger(__name__)
 
@@ -56,7 +57,9 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 <b>Status & Info</b>
 /status - Current bankroll and today's P&L
 /positions - List open positions
-/performance - Strategy comparison
+/stats - Strategy win rates &amp; ROI
+/stats week - Last 7 days by strategy
+/stats month - Last 30 days by strategy
 
 <b>Trading Control</b>
 /stop - EMERGENCY STOP all trading
@@ -67,7 +70,6 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 /daily - Today's performance
 /weekly - Last 7 days performance
 /monthly - Last 30 days performance
-/report - Same as /weekly
 
 <b>Other</b>
 /help - Show this message
@@ -462,6 +464,152 @@ async def _generate_report(update: Update, days: int, title: str) -> None:
     except Exception as e:
         logger.error(f"Error generating {title} report", error=str(e))
         await update.message.reply_text(f"Error generating report: {str(e)[:100]}")
+
+
+async def handle_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handle /stats command - show strategy performance by time period.
+
+    Usage:
+        /stats - Show all-time stats
+        /stats today - Today's stats
+        /stats week - Last 7 days
+        /stats month - Last 30 days
+    """
+    if not _is_authorized(update):
+        await _unauthorized(update)
+        return
+
+    # Parse time period argument
+    period = "all"
+    if context.args:
+        period = context.args[0].lower()
+
+    # Calculate date filter
+    now = datetime.utcnow()
+    if period == "today":
+        start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        period_label = "Today"
+    elif period == "week":
+        start_date = now - timedelta(days=7)
+        period_label = "Last 7 Days"
+    elif period == "month":
+        start_date = now - timedelta(days=30)
+        period_label = "Last 30 Days"
+    else:
+        start_date = None
+        period_label = "All Time"
+
+    try:
+        async with db.session() as session:
+            # Build query with optional date filter
+            if start_date:
+                query = text("""
+                    SELECT
+                        strategy,
+                        COUNT(*) as total_bets,
+                        SUM(CASE WHEN profit_loss > 0 THEN 1 ELSE 0 END) as wins,
+                        SUM(CASE WHEN profit_loss < 0 THEN 1 ELSE 0 END) as losses,
+                        SUM(CASE WHEN profit_loss = 0 AND status = 'SETTLED' THEN 1 ELSE 0 END) as pushes,
+                        SUM(CASE WHEN status = 'MATCHED' THEN 1 ELSE 0 END) as open_bets,
+                        SUM(CASE WHEN status = 'SETTLED' THEN profit_loss ELSE 0 END) as pnl,
+                        SUM(CASE WHEN status = 'SETTLED' THEN stake ELSE 0 END) as staked
+                    FROM bets
+                    WHERE is_paper = 1 AND placed_at >= :start_date
+                    GROUP BY strategy
+                    ORDER BY pnl DESC
+                """)
+                result = await session.execute(query, {"start_date": start_date.isoformat()})
+            else:
+                query = text("""
+                    SELECT
+                        strategy,
+                        COUNT(*) as total_bets,
+                        SUM(CASE WHEN profit_loss > 0 THEN 1 ELSE 0 END) as wins,
+                        SUM(CASE WHEN profit_loss < 0 THEN 1 ELSE 0 END) as losses,
+                        SUM(CASE WHEN profit_loss = 0 AND status = 'SETTLED' THEN 1 ELSE 0 END) as pushes,
+                        SUM(CASE WHEN status = 'MATCHED' THEN 1 ELSE 0 END) as open_bets,
+                        SUM(CASE WHEN status = 'SETTLED' THEN profit_loss ELSE 0 END) as pnl,
+                        SUM(CASE WHEN status = 'SETTLED' THEN stake ELSE 0 END) as staked
+                    FROM bets
+                    WHERE is_paper = 1
+                    GROUP BY strategy
+                    ORDER BY pnl DESC
+                """)
+                result = await session.execute(query)
+
+            rows = result.fetchall()
+
+            if not rows:
+                await update.message.reply_text(
+                    f"No betting data for {period_label}.\n\n"
+                    "Usage:\n"
+                    "/stats - All time\n"
+                    "/stats today\n"
+                    "/stats week\n"
+                    "/stats month"
+                )
+                return
+
+            # Build response
+            text_msg = f"<b>📊 Strategy Stats ({period_label})</b>\n\n"
+
+            total_pnl = 0.0
+            total_staked = 0.0
+            total_bets = 0
+            total_wins = 0
+            total_losses = 0
+
+            for row in rows:
+                strategy, bets, wins, losses, pushes, open_bets, pnl, staked = row
+                wins = wins or 0
+                losses = losses or 0
+                pushes = pushes or 0
+                open_bets = open_bets or 0
+                pnl = pnl or 0.0
+                staked = staked or 0.0
+
+                settled = wins + losses + pushes
+                win_rate = (wins / settled * 100) if settled > 0 else 0
+                roi = (pnl / staked * 100) if staked > 0 else 0
+
+                # Emoji indicator
+                if pnl > 0:
+                    emoji = "✅"
+                elif pnl < 0:
+                    emoji = "❌"
+                else:
+                    emoji = "⏳"
+
+                text_msg += f"{emoji} <b>{strategy}</b>\n"
+                text_msg += f"   Bets: {bets} ({wins}W / {losses}L"
+                if open_bets > 0:
+                    text_msg += f" / {open_bets} open"
+                text_msg += ")\n"
+                text_msg += f"   Win Rate: <b>{win_rate:.0f}%</b>\n"
+                text_msg += f"   P&L: <b>£{pnl:+.2f}</b> (ROI: {roi:+.1f}%)\n\n"
+
+                total_pnl += pnl
+                total_staked += staked
+                total_bets += bets
+                total_wins += wins
+                total_losses += losses
+
+            # Add totals
+            total_roi = (total_pnl / total_staked * 100) if total_staked > 0 else 0
+            total_win_rate = (total_wins / (total_wins + total_losses) * 100) if (total_wins + total_losses) > 0 else 0
+
+            text_msg += "─────────────────\n"
+            text_msg += f"<b>TOTAL</b>\n"
+            text_msg += f"   Bets: {total_bets} ({total_wins}W / {total_losses}L)\n"
+            text_msg += f"   Win Rate: <b>{total_win_rate:.0f}%</b>\n"
+            text_msg += f"   P&L: <b>£{total_pnl:+.2f}</b> (ROI: {total_roi:+.1f}%)\n"
+
+            await update.message.reply_text(text_msg, parse_mode="HTML")
+
+    except Exception as e:
+        logger.error("Error handling /stats", error=str(e))
+        await update.message.reply_text(f"Error getting stats: {str(e)[:100]}")
 
 
 async def handle_unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

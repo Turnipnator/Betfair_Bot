@@ -131,12 +131,12 @@ class StrategySettings(BaseSettings):
         description="Comma-separated list of enabled strategies",
     )
     value_min_edge: float = Field(
-        default=0.10,
+        default=0.20,
         alias="VALUE_MIN_EDGE",
-        description="Minimum edge for value betting (0.10 = 10%)",
+        description="Minimum edge for value betting (0.20 = 20%)",
     )
     value_max_odds: float = Field(
-        default=3.5,  # Lowered from 6.0 - focus on more likely outcomes
+        default=2.5,  # Favourites only - was 3.5, before that 6.0
         alias="VALUE_MAX_ODDS",
         description="Maximum odds to consider for value bets",
     )
@@ -149,6 +149,37 @@ class StrategySettings(BaseSettings):
     def get_enabled_list(self) -> list[str]:
         """Get enabled strategies as a list."""
         return [s.strip() for s in self.enabled_strategies.split(",") if s.strip()]
+
+
+class StreamingSettings(BaseSettings):
+    """Betfair streaming configuration for real-time in-play trading."""
+
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="STREAMING_", extra="ignore")
+
+    enabled: bool = Field(
+        default=True,
+        description="Enable streaming for LTD in-play position management",
+    )
+    conflate_ms: int = Field(
+        default=500,
+        description="Bundle updates within this window (milliseconds)",
+    )
+    heartbeat_ms: int = Field(
+        default=5000,
+        description="Heartbeat interval (milliseconds)",
+    )
+    reconnect_delay: int = Field(
+        default=5,
+        description="Initial delay before reconnection attempt (seconds)",
+    )
+    max_reconnect_delay: int = Field(
+        default=60,
+        description="Maximum reconnection delay (seconds)",
+    )
+    goal_threshold: float = Field(
+        default=1.3,
+        description="Odds spike threshold for goal detection (1.3 = 30% increase)",
+    )
 
 
 class Settings(BaseSettings):
@@ -202,6 +233,7 @@ class Settings(BaseSettings):
     telegram: TelegramSettings = Field(default_factory=TelegramSettings)
     market: MarketSettings = Field(default_factory=MarketSettings)
     strategy: StrategySettings = Field(default_factory=StrategySettings)
+    streaming: StreamingSettings = Field(default_factory=StreamingSettings)
 
     @field_validator("log_level")
     @classmethod

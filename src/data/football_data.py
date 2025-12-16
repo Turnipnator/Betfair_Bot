@@ -53,6 +53,12 @@ LEAGUE_URLS = {
     "T1": "https://www.football-data.co.uk/mmz4281/2526/T1.csv",  # Süper Lig
     # Greece
     "G1": "https://www.football-data.co.uk/mmz4281/2526/G1.csv",  # Super League Greece
+    # Austria
+    "AUT": "https://www.football-data.co.uk/new/AUT.csv",  # Austrian Bundesliga
+    # Denmark
+    "DNK": "https://www.football-data.co.uk/new/DNK.csv",  # Danish Superliga
+    # Switzerland
+    "SWZ": "https://www.football-data.co.uk/new/SWZ.csv",  # Swiss Super League
 }
 
 # League tiers - Tier 1 = top division, Tier 2 = second division
@@ -61,10 +67,9 @@ LEAGUE_TIERS = {
     # Tier 1 - Top divisions (most data, most predictable)
     "E0": 1, "SP1": 1, "D1": 1, "I1": 1, "F1": 1,  # Big 5
     "P1": 1, "N1": 1, "B1": 1, "T1": 1, "G1": 1,  # Other top European
-    "SC0": 1, "A1": 1,  # Scotland/Austria top
-    "ARG": 1, "BRA": 1, "MEX": 1, "USA": 1,  # Americas top
-    "JPN": 1, "CHN": 1,  # Asia top
-    "DNK": 1, "NOR": 1, "SWE": 1, "SWZ": 1, "POL": 1, "ROU": 1, "RUS": 1, "FIN": 1, "IRL": 1,
+    "SC0": 1, "AUT": 1,  # Scotland/Austria top
+    "DNK": 1, "SWZ": 1,  # Denmark/Switzerland top
+    "NOR": 1, "SWE": 1, "POL": 1, "ROU": 1, "FIN": 1, "IRL": 1,  # Other European
     # Tier 2 - Second divisions
     "E1": 2, "SP2": 2, "D2": 2, "I2": 2, "F2": 2,  # Big 5 second tier
     "SC1": 2,  # Scottish Championship
@@ -127,6 +132,18 @@ LEAGUE_NAME_MAP = {
     # Greece
     "super league greece": "G1",
     "gre 1": "G1",
+    # Austria
+    "austrian bundesliga": "AUT",
+    "austria bundesliga": "AUT",
+    "aut 1": "AUT",
+    # Denmark
+    "danish superliga": "DNK",
+    "superliga": "DNK",
+    "dnk 1": "DNK",
+    # Switzerland
+    "swiss super league": "SWZ",
+    "super league switzerland": "SWZ",
+    "swz 1": "SWZ",
 }
 
 
@@ -523,10 +540,23 @@ class FootballDataService:
 
             league_stats = LeagueStats(league_code=league_code)
 
+            # For "new" format leagues (AUT, DNK, SWZ), filter to current season
+            current_season = "2024/2025"  # Update each season
+            is_new_format = league_code in ("AUT", "DNK", "SWZ")
+
             for row in reader:
                 try:
-                    home_team = row.get("HomeTeam", "").strip()
-                    away_team = row.get("AwayTeam", "").strip()
+                    # Skip non-current seasons for new format leagues
+                    if is_new_format:
+                        season = row.get("Season", "")
+                        if season != current_season:
+                            continue
+
+                    # Try different column names for teams (new format uses Home/Away)
+                    home_team = row.get("HomeTeam", "") or row.get("Home", "")
+                    away_team = row.get("AwayTeam", "") or row.get("Away", "")
+                    home_team = home_team.strip()
+                    away_team = away_team.strip()
 
                     # Try different column names for goals
                     home_goals = int(row.get("FTHG") or row.get("HG") or 0)

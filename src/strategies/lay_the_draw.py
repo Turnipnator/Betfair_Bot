@@ -199,6 +199,7 @@ class LayTheDrawStrategy(BaseStrategy):
             sport=Sport.FOOTBALL,
             market_name=market.market_name,
             event_name=market.event_name,
+            competition=market.competition,
             reason=f"LTD entry: Draw @ {draw_odds:.2f}",
         )
 
@@ -307,6 +308,7 @@ class LayTheDrawStrategy(BaseStrategy):
             sport=Sport.FOOTBALL,
             market_name=market.market_name,
             event_name=market.event_name,
+            competition=market.competition,
             reason=f"LTD exit ({reason}): Back @ {exit_odds:.2f}",
         )
 

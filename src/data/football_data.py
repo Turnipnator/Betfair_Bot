@@ -758,12 +758,16 @@ class FootballDataService:
         )
         return None
 
-    async def is_match_covered(self, home_team: str, away_team: str) -> bool:
+    async def is_match_covered(
+        self, home_team: str, away_team: str, event_name: str = ""
+    ) -> bool:
         """
         Check if a match is covered by football-data.co.uk.
 
         This ensures we only bet on matches where we can get real results
         for settlement. Rejects matches from:
+        - Cup competitions (FA Cup, EFL Cup, Copa del Rey, etc.)
+        - European competitions (Champions League, Europa League)
         - Non-European leagues
         - Reserve/B teams
         - Women's football
@@ -772,10 +776,34 @@ class FootballDataService:
         Args:
             home_team: Home team name
             away_team: Away team name
+            event_name: Event/competition name from Betfair (optional)
 
         Returns:
             True if both teams are found in covered leagues
         """
+        # Quick rejection for cup competitions
+        cup_patterns = [
+            "cup", "copa", "coupe", "pokal", "coppa",  # Generic cup names
+            "efl", "carabao", "league cup",  # English League Cup
+            "fa cup", "fa trophy",  # English FA competitions
+            "champions league", "europa league", "conference league",  # European
+            "uefa", "super cup", "community shield",
+            "dfb", "taca",  # German/Portuguese cups
+            "quarter-final", "semi-final", "final",  # Knockout round indicators
+            "round of 16", "round of 32",
+        ]
+        event_lower = event_name.lower() if event_name else ""
+        for pattern in cup_patterns:
+            if pattern in event_lower:
+                logger.debug(
+                    "Match rejected - cup competition",
+                    home=home_team,
+                    away=away_team,
+                    event=event_name,
+                    pattern=pattern,
+                )
+                return False
+
         # Quick rejection for known uncovered patterns
         uncovered_patterns = [
             " (w)", "(w)", " women", " ladies",  # Women's football

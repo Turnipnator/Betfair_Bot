@@ -65,6 +65,7 @@ class BetSignal:
     sport: Optional[Sport] = None
     market_name: Optional[str] = None
     event_name: Optional[str] = None
+    competition: Optional[str] = None  # Competition name (e.g., "Premier League", "EFL Cup")
     reason: str = ""
 
     # Timing

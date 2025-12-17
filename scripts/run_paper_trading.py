@@ -797,11 +797,15 @@ class PaperTradingEngine:
                     parts = signal.event_name.split(" v ")
                     if len(parts) == 2:
                         home_team, away_team = parts[0].strip(), parts[1].strip()
-                        is_covered = await football_data_service.is_match_covered(home_team, away_team)
+                        # Pass competition name to filter out cup games
+                        is_covered = await football_data_service.is_match_covered(
+                            home_team, away_team, event_name=signal.competition or ""
+                        )
                         if not is_covered:
                             logger.info(
                                 "Signal rejected - match not covered by football-data.co.uk",
                                 event=signal.event_name,
+                                competition=signal.competition,
                                 strategy=signal.strategy,
                             )
                             return

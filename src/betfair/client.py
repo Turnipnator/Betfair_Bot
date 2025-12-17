@@ -310,6 +310,7 @@ class BetfairClient:
                         )
                     )
 
+            competition_name = cat.competition.name if cat.competition else None
             return Market(
                 market_id=cat.market_id,
                 market_name=cat.market_name,
@@ -319,7 +320,7 @@ class BetfairClient:
                 start_time=cat.market_start_time,
                 venue=cat.event.venue if cat.event else None,
                 country_code=cat.event.country_code if cat.event else None,
-                competition=cat.competition.name if cat.competition else None,
+                competition=competition_name,
                 runners=runners,
             )
         except Exception as e:

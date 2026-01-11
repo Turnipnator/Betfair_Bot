@@ -373,6 +373,77 @@ class BetfairClient:
             logger.warning("Error updating market prices", error=str(e))
             return market
 
+    async def get_cleared_orders(
+        self,
+        from_hours: int = 24,
+        settled_only: bool = True,
+    ) -> list[dict]:
+        """
+        Get cleared (settled) orders from Betfair.
+
+        This is the definitive source for bet settlement in live trading.
+        Returns actual P&L from Betfair's records.
+
+        Args:
+            from_hours: How far back to look (default 24 hours)
+            settled_only: Only return fully settled orders
+
+        Returns:
+            List of cleared order records with settlement details.
+        """
+        if not self.is_logged_in:
+            logger.error("Not logged in to Betfair")
+            return []
+
+        try:
+            loop = asyncio.get_event_loop()
+
+            # Time range for settled orders
+            from_time = datetime.utcnow() - timedelta(hours=from_hours)
+            to_time = datetime.utcnow()
+
+            # Fetch cleared orders
+            cleared = await loop.run_in_executor(
+                None,
+                lambda: self._client.betting.list_cleared_orders(
+                    bet_status="SETTLED" if settled_only else "ALL",
+                    settled_date_range={
+                        "from": from_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "to": to_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    },
+                ),
+            )
+
+            orders = []
+            for order in cleared.orders if hasattr(cleared, 'orders') else []:
+                orders.append({
+                    "bet_id": order.bet_id,
+                    "market_id": order.market_id,
+                    "selection_id": order.selection_id,
+                    "side": order.side,  # BACK or LAY
+                    "price_requested": order.price_requested,
+                    "price_matched": order.price_matched,
+                    "size_settled": order.size_settled,
+                    "profit": order.profit,  # Net P&L after commission
+                    "commission": order.commission if hasattr(order, 'commission') else 0,
+                    "settled_date": order.settled_date,
+                    "bet_outcome": order.bet_outcome,  # WON, LOST, or None
+                })
+
+            logger.info(
+                "Fetched cleared orders from Betfair",
+                count=len(orders),
+                from_hours=from_hours,
+            )
+            return orders
+
+        except APIError as e:
+            logger.error("Error fetching cleared orders", error=str(e))
+            return []
+        except Exception as e:
+            logger.error("Unexpected error fetching cleared orders", error=str(e))
+            return []
+
 
 # Global client instance
 betfair_client = BetfairClient()

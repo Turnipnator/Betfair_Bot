@@ -342,6 +342,15 @@ class PaperTradingEngine:
             replace_existing=True,
         )
 
+        # Schedule Betfair reconciliation (primary settlement for LIVE trading)
+        # Runs every 5 minutes - only does work in live mode
+        self._scheduler.add_job(
+            self.reconcile_with_betfair,
+            IntervalTrigger(minutes=5),
+            id="betfair_reconciliation",
+            replace_existing=True,
+        )
+
         # Schedule keep-alive for Betfair session
         if betfair_client.is_logged_in:
             self._scheduler.add_job(
@@ -696,14 +705,9 @@ class PaperTradingEngine:
 
                 match_result, selection_type = result_data
 
-                # Determine if our selection won based on bet type and result
-                if bet.bet_type == BetType.BACK:
-                    # We backed this selection - did it win?
-                    selection_won = match_result.winner == selection_type
-                else:
-                    # We laid this selection (e.g., lay the draw) - did it LOSE?
-                    # For LAY bets, we win if the selection LOSES
-                    selection_won = match_result.winner != selection_type
+                # Determine if the SELECTION won (not whether WE won the bet)
+                # The settle_bet function handles the inversion for LAY bets
+                selection_won = match_result.winner == selection_type
 
                 # Settle the bet with real result
                 success, pnl = self._simulator.settle_bet(bet.id, selection_won)
@@ -754,6 +758,120 @@ class PaperTradingEngine:
         except Exception as e:
             logger.error("Error settling stale bets", error=str(e))
 
+    async def reconcile_with_betfair(self) -> None:
+        """
+        Reconcile open bets with Betfair's cleared orders.
+
+        This is the PRIMARY settlement method for LIVE trading.
+        Uses Betfair's actual settlement data - no external dependencies.
+
+        In paper trading mode, this does nothing (no actual bets to reconcile).
+        """
+        # Skip in paper mode - no actual Betfair bets exist
+        if settings.is_paper_mode():
+            return
+
+        if not self._simulator:
+            return
+
+        if not betfair_client.is_logged_in:
+            return
+
+        try:
+            open_bets = self._simulator.get_open_bets()
+            if not open_bets:
+                return
+
+            # Only reconcile bets that have a Betfair bet reference
+            bets_with_ref = [b for b in open_bets if b.bet_ref and not b.bet_ref.startswith("PAPER_")]
+            if not bets_with_ref:
+                return
+
+            logger.info(
+                "Reconciling bets with Betfair",
+                open_bets=len(bets_with_ref),
+            )
+
+            # Get cleared orders from Betfair (last 24 hours)
+            cleared_orders = await betfair_client.get_cleared_orders(from_hours=24)
+
+            if not cleared_orders:
+                return
+
+            # Index cleared orders by bet_id for fast lookup
+            cleared_by_id = {order["bet_id"]: order for order in cleared_orders}
+
+            reconciled_count = 0
+
+            for bet in bets_with_ref:
+                # Check if this bet has been settled by Betfair
+                cleared = cleared_by_id.get(bet.bet_ref)
+                if not cleared:
+                    continue
+
+                # Determine result from Betfair's data
+                bet_outcome = cleared.get("bet_outcome")
+                profit = cleared.get("profit", 0)
+
+                if bet_outcome == "WON":
+                    selection_won = True
+                elif bet_outcome == "LOST":
+                    selection_won = False
+                else:
+                    # Voided or unknown - skip for now
+                    continue
+
+                # Settle the bet using Betfair's actual P&L
+                success, _ = self._simulator.settle_bet(bet.id, selection_won)
+
+                if success:
+                    # Override with Betfair's actual profit (includes exact commission)
+                    bet.profit_loss = profit
+                    bet.commission = cleared.get("commission", 0)
+
+                    reconciled_count += 1
+
+                    # Remove from tracking
+                    if bet.strategy in self._markets_with_bets:
+                        self._markets_with_bets[bet.strategy].discard(bet.market_id)
+
+                    # Send notification
+                    await notifier.bet_settled(bet)
+
+                    # Update database with Betfair's actual figures
+                    try:
+                        async with db.session() as session:
+                            bet_repo = BetRepository(session)
+                            if bet.id:
+                                await bet_repo.settle(
+                                    bet.id,
+                                    bet.result,
+                                    profit,  # Use Betfair's actual P&L
+                                    cleared.get("commission", 0),
+                                )
+                                await session.commit()
+                    except Exception as db_error:
+                        logger.warning(
+                            "Failed to update DB for reconciled bet",
+                            error=str(db_error)[:100],
+                        )
+
+                    logger.info(
+                        "Bet reconciled with Betfair",
+                        bet_ref=bet.bet_ref,
+                        outcome=bet_outcome,
+                        profit=f"£{profit:+.2f}",
+                    )
+
+            if reconciled_count > 0:
+                logger.info(
+                    "Betfair reconciliation complete",
+                    reconciled=reconciled_count,
+                )
+
+        except Exception as e:
+            logger.error("Error reconciling with Betfair", error=str(e))
+
     async def process_signal(self, signal: BetSignal) -> None:
         """Process a betting signal."""
         if not self._simulator:
@@ -790,8 +908,9 @@ class PaperTradingEngine:
                 logger.warning("DB check failed, proceeding with bet", error=str(db_err)[:50])
 
             # Check if match is covered by football-data.co.uk (for settlement)
-            # Only applies to football markets
-            if signal.sport and signal.sport.value == "football" and signal.event_name:
+            # Only applies to paper mode football markets
+            # In live mode, we use Betfair reconciliation which handles all markets
+            if settings.is_paper_mode() and signal.sport and signal.sport.value == "football" and signal.event_name:
                 # Parse home/away teams from event name (format: "Home v Away")
                 if " v " in signal.event_name:
                     parts = signal.event_name.split(" v ")
@@ -804,7 +923,7 @@ class PaperTradingEngine:
                         if not is_covered:
                             logger.info(
                                 "Signal rejected - match not covered by football-data.co.uk",
-                                event=signal.event_name,
+                                match=signal.event_name,
                                 competition=signal.competition,
                                 strategy=signal.strategy,
                             )
@@ -905,7 +1024,7 @@ class PaperTradingEngine:
                     logger.info(
                         "Added LTD position to streaming monitor",
                         market_id=signal.market_id,
-                        event=signal.event_name,
+                        match=signal.event_name,
                     )
             else:
                 logger.debug(

@@ -46,7 +46,7 @@ class ValueBettingStrategy(BaseStrategy):
     def __init__(
         self,
         min_edge: Optional[float] = None,
-        min_odds: float = 1.50,
+        min_odds: Optional[float] = None,
         max_odds: Optional[float] = None,
         min_volume: float = 100.0,  # Lowered from 1000 for paper trading
     ) -> None:
@@ -55,17 +55,21 @@ class ValueBettingStrategy(BaseStrategy):
 
         Args:
             min_edge: Minimum edge required (default from settings)
-            min_odds: Minimum odds to consider
+            min_odds: Minimum odds to consider (default from settings)
             max_odds: Maximum odds to consider (default from settings)
             min_volume: Minimum matched volume on selection
         """
         super().__init__()
 
         self.min_edge = min_edge or settings.strategy.value_min_edge
-        self.min_odds = min_odds
+        self.min_odds = min_odds or settings.strategy.value_min_odds
         self.max_odds = max_odds or settings.strategy.value_max_odds
         self.min_volume = min_volume
         self.daily_bet_limit = settings.strategy.daily_bet_limit
+
+        # Tiered edge settings - require more edge for higher odds
+        self.high_odds_threshold = settings.strategy.value_high_odds_threshold
+        self.high_odds_min_edge = settings.strategy.value_high_odds_min_edge
 
         # Track bets placed today
         self._bets_today = 0
@@ -210,12 +214,20 @@ class ValueBettingStrategy(BaseStrategy):
                 # If we got probabilities from Poisson model, use them
                 if self._model_probabilities:
                     return
+                # NO FALLBACK FOR FOOTBALL - we require real Poisson data
+                # This prevents betting on leagues not covered by football-data.co.uk
+                logger.debug(
+                    "No Poisson data available for football match - skipping",
+                    market=market.market_name,
+                )
+                return  # Don't fall through to random fallback
             except Exception as e:
                 logger.warning(
-                    "Failed to generate Poisson probabilities, using fallback",
+                    "Failed to generate Poisson probabilities - skipping match",
                     error=str(e),
                     market=market.market_name,
                 )
+                return  # Don't fall through to random fallback
 
         # Check if this is horse racing - use Shin model
         if market.sport == Sport.HORSE_RACING:
@@ -289,12 +301,20 @@ class ValueBettingStrategy(BaseStrategy):
     # League tier settings (1 = top, 2 = second division, 3+ = lower)
     MAX_LEAGUE_TIER = 2  # Only bet on tier 1 and 2 leagues
 
+    # Big 5 leagues only - where xG data is available for better predictions
+    # Backtest showed +20% ROI on big 5 vs negative ROI on other leagues
+    BIG_5_LEAGUES = {"E0", "SP1", "D1", "I1", "F1"}  # EPL, La Liga, Bundesliga, Serie A, Ligue 1
+    REQUIRE_BIG_5 = True  # Only bet on big 5 leagues
+
     # Draw exclusion - we have LTD strategy for draws
     EXCLUDE_DRAWS = True
 
     async def _generate_football_poisson_probs(self, market: Market) -> None:
         """
         Generate probabilities using Poisson model with real team data.
+
+        Uses xG (expected goals) from Understat when available (big 5 leagues),
+        falls back to actual goals from football-data.co.uk for other leagues.
 
         Applies form-based filters and league tier restrictions.
 
@@ -316,7 +336,7 @@ class ValueBettingStrategy(BaseStrategy):
             )
             return
 
-        # Get team statistics
+        # Get team statistics from football-data.co.uk (required for filters)
         match_stats = await data_service.get_match_stats(home_team, away_team)
         if not match_stats:
             logger.info(
@@ -337,6 +357,15 @@ class ValueBettingStrategy(BaseStrategy):
                 league=league_stats.league_code,
                 tier=league_tier,
                 max_tier=self.MAX_LEAGUE_TIER,
+            )
+            return
+
+        # Filter: Big 5 leagues only (where xG data is available)
+        if self.REQUIRE_BIG_5 and league_stats.league_code not in self.BIG_5_LEAGUES:
+            logger.debug(
+                "Skipping - not a big 5 league (xG required)",
+                league=league_stats.league_code,
+                big_5=list(self.BIG_5_LEAGUES),
             )
             return
 
@@ -379,19 +408,57 @@ class ValueBettingStrategy(BaseStrategy):
             )
             return
 
+        # Try to get xG data from Understat (big 5 leagues only)
+        using_xg = False
+        home_scored_avg = home_stats.home_scored_avg
+        home_conceded_avg = home_stats.home_conceded_avg
+        away_scored_avg = away_stats.away_scored_avg
+        away_conceded_avg = away_stats.away_conceded_avg
+        league_avg_home = league_stats.avg_home_goals
+        league_avg_away = league_stats.avg_away_goals
+
+        try:
+            from src.data.understat_data import understat_service
+
+            xg_match = await understat_service.get_match_xg(home_team, away_team, league_stats.league_code)
+            if xg_match:
+                home_xg, away_xg, league_xg = xg_match
+
+                # Only use xG if we have enough home/away data
+                if home_xg.home_played >= 3 and away_xg.away_played >= 3:
+                    home_scored_avg = home_xg.home_xg_avg
+                    home_conceded_avg = home_xg.home_xga_avg
+                    away_scored_avg = away_xg.away_xg_avg
+                    away_conceded_avg = away_xg.away_xga_avg
+                    league_avg_home = league_xg.avg_home_xg
+                    league_avg_away = league_xg.avg_away_xg
+                    using_xg = True
+
+                    logger.debug(
+                        "Using xG data for prediction",
+                        home=home_team,
+                        away=away_team,
+                        home_xg_avg=f"{home_scored_avg:.2f}",
+                        away_xg_avg=f"{away_scored_avg:.2f}",
+                    )
+        except ImportError:
+            # understat package not installed - use actual goals
+            pass
+        except Exception as e:
+            logger.debug(f"Failed to get xG data, using actual goals: {e}")
+
         # Initialize Poisson model with league averages
         poisson = FootballPoissonModel(
-            league_avg_home=league_stats.avg_home_goals,
-            league_avg_away=league_stats.avg_away_goals,
+            league_avg_home=league_avg_home,
+            league_avg_away=league_avg_away,
         )
 
-        # Get prediction using team averages
-        # The model calculates attack/defense strengths internally
+        # Get prediction using team averages (xG if available, actual goals otherwise)
         prediction = poisson.predict_match(
-            home_scored_avg=home_stats.home_scored_avg,
-            home_conceded_avg=home_stats.home_conceded_avg,
-            away_scored_avg=away_stats.away_scored_avg,
-            away_conceded_avg=away_stats.away_conceded_avg,
+            home_scored_avg=home_scored_avg,
+            home_conceded_avg=home_conceded_avg,
+            away_scored_avg=away_scored_avg,
+            away_conceded_avg=away_conceded_avg,
         )
 
         logger.info(
@@ -401,12 +468,13 @@ class ValueBettingStrategy(BaseStrategy):
             home_prob=f"{prediction.home_win_prob:.1%}",
             draw_prob=f"{prediction.draw_prob:.1%}",
             away_prob=f"{prediction.away_win_prob:.1%}",
-            home_xg=f"{prediction.expected_home_goals:.2f}",
-            away_xg=f"{prediction.expected_away_goals:.2f}",
+            expected_home=f"{prediction.expected_home_goals:.2f}",
+            expected_away=f"{prediction.expected_away_goals:.2f}",
             league=league_stats.league_code,
             tier=league_tier,
             home_form=f"{home_stats.home_win_rate:.0%}",
             away_form=f"{away_stats.away_win_rate:.0%}",
+            using_xg=using_xg,
         )
 
         # Map predictions to runner selection IDs
@@ -606,19 +674,25 @@ class ValueBettingStrategy(BaseStrategy):
         implied_prob = decimal_to_implied_prob(odds)
         edge = model_prob - implied_prob
 
+        # Tiered edge requirement - higher odds need more edge
+        required_edge = self.min_edge
+        if odds >= self.high_odds_threshold:
+            required_edge = self.high_odds_min_edge
+
         # Log significant edges (within 3% of threshold or above)
-        if edge > self.min_edge - 0.03:
+        if edge > required_edge - 0.03:
             logger.info(
                 "Runner edge calculated",
                 runner=runner.name[:20],
                 odds=f"{odds:.2f}",
                 edge=f"{edge:.1%}",
-                min_edge=f"{self.min_edge:.1%}",
-                qualifies=edge >= self.min_edge,
+                required_edge=f"{required_edge:.1%}",
+                qualifies=edge >= required_edge,
+                high_odds=odds >= self.high_odds_threshold,
             )
 
-        # Check minimum edge
-        if edge < self.min_edge:
+        # Check minimum edge (tiered)
+        if edge < required_edge:
             return None
 
         # Calculate stake (will be set properly when we have bankroll)

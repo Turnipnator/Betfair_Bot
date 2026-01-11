@@ -965,7 +965,7 @@ class FootballDataService:
                     break
 
         if len(parts) != 2:
-            logger.warning("Could not parse teams from event name", event=event_name)
+            logger.warning("Could not parse teams from event name", match=event_name)
             return None
 
         home_team = parts[0].strip()

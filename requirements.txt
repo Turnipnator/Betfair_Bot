@@ -27,6 +27,10 @@ python-telegram-bot>=20.7
 pandas>=2.1.0
 numpy>=1.26.0
 
+# Football xG data
+# understat installed separately in Dockerfile with --no-deps due to dependency conflicts
+beautifulsoup4>=4.11.0
+
 # Logging and monitoring
 structlog>=23.2.0
 

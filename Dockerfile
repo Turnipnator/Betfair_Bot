@@ -13,6 +13,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Install understat with --no-deps to avoid dependency conflicts
+# (library has overly pinned deps but works fine with our versions)
+RUN pip install --no-cache-dir --no-deps understat>=0.1.14
+
 # Copy application code
 COPY . .
 

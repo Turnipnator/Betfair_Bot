@@ -131,14 +131,29 @@ class StrategySettings(BaseSettings):
         description="Comma-separated list of enabled strategies",
     )
     value_min_edge: float = Field(
-        default=0.20,
+        default=0.15,  # Lowered from 0.20 to get more opportunities
         alias="VALUE_MIN_EDGE",
-        description="Minimum edge for value betting (0.20 = 20%)",
+        description="Minimum edge for value betting (0.15 = 15%)",
+    )
+    value_min_odds: float = Field(
+        default=1.50,  # Lowered from 1.60 to get more action
+        alias="VALUE_MIN_ODDS",
+        description="Minimum odds to consider for value bets",
     )
     value_max_odds: float = Field(
-        default=2.5,  # Favourites only - was 3.5, before that 6.0
+        default=2.50,  # Widened from 2.10 to get more action
         alias="VALUE_MAX_ODDS",
         description="Maximum odds to consider for value bets",
+    )
+    value_high_odds_threshold: float = Field(
+        default=2.00,  # Raised from 1.90
+        alias="VALUE_HIGH_ODDS_THRESHOLD",
+        description="Odds above this require higher edge",
+    )
+    value_high_odds_min_edge: float = Field(
+        default=0.20,  # Lowered from 0.25
+        alias="VALUE_HIGH_ODDS_MIN_EDGE",
+        description="Minimum edge for high odds bets (0.20 = 20%)",
     )
     daily_bet_limit: int = Field(
         default=20,

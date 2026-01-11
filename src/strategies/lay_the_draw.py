@@ -90,7 +90,7 @@ class LayTheDrawStrategy(BaseStrategy):
     requires_inplay: bool = False  # Entry is pre-play
 
     # Minimum goals filter - avoid 0-0 draws which kill LTD
-    MIN_TEAM_GOALS_AVG = 0.5  # Lowered to get more opportunities (95% of matches pass)
+    MIN_TEAM_GOALS_AVG = 0.9  # Teams must avg close to 1 goal/game
 
     def __init__(
         self,

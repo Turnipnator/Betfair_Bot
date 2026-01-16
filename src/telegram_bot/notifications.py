@@ -113,10 +113,11 @@ class Notifier:
         """Notify that a bet has been placed."""
         mode = "PAPER" if bet.is_paper else "LIVE"
         bet_type = "BACK" if bet.bet_type == BetType.BACK else "LAY"
+        match_info = f"\n{bet.event_name}" if bet.event_name else ""
 
         text = (
             f"<b>BET PLACED ({mode})</b>\n\n"
-            f"<b>{bet.selection_name}</b>\n"
+            f"<b>{bet.selection_name}</b>{match_info}\n"
             f"{bet_type} @ {bet.matched_odds:.2f}\n"
             f"Stake: £{bet.stake:.2f}\n"
             f"Potential: £{bet.potential_profit:+.2f} / £{bet.potential_loss:-.2f}\n"
@@ -127,6 +128,8 @@ class Notifier:
     async def bet_settled(self, bet: Bet) -> bool:
         """Notify that a bet has been settled."""
         mode = "PAPER" if bet.is_paper else "LIVE"
+        bet_type = "BACK" if bet.bet_type == BetType.BACK else "LAY"
+        match_info = f"\n{bet.event_name}" if bet.event_name else ""
 
         result_emoji = {
             BetResult.WON: "WIN",
@@ -136,7 +139,8 @@ class Notifier:
 
         text = (
             f"<b>BET SETTLED ({mode})</b>\n\n"
-            f"<b>{bet.selection_name}</b>\n"
+            f"<b>{bet.selection_name}</b>{match_info}\n"
+            f"{bet_type} @ {bet.matched_odds:.2f}\n"
             f"Result: {result_emoji}\n"
             f"P&L: £{bet.profit_loss:+.2f}\n"
             f"Commission: £{bet.commission:.2f}\n"

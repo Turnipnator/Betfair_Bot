@@ -459,9 +459,9 @@ class PaperTradingEngine:
                 await self.daily_reset()
 
             # Build filter
-            # Include major European leagues for football
+            # Include major European leagues for football + tennis
             market_filter = MarketFilter(
-                sports=[Sport.HORSE_RACING, Sport.FOOTBALL],
+                sports=[Sport.HORSE_RACING, Sport.FOOTBALL, Sport.TENNIS],
                 market_types=["WIN", "MATCH_ODDS"],
                 countries=[
                     "GB", "IE",  # UK & Ireland
@@ -474,10 +474,12 @@ class PaperTradingEngine:
                     "BE",  # Belgium (Jupiler Pro League)
                     "TR",  # Turkey (Süper Lig)
                     "GR",  # Greece (Super League)
+                    "AU",  # Australia (Australian Open)
+                    "US",  # USA (US Open, Miami, etc.)
                 ],
                 from_hours=0.5,  # Starting in 30 mins
                 to_hours=12,  # Up to 12 hours ahead
-                max_results=100,  # Increased for more markets
+                max_results=150,  # Increased for tennis markets
             )
 
             # Fetch markets
@@ -496,6 +498,11 @@ class PaperTradingEngine:
                 markets = []
 
             self._markets_scanned += len(markets)
+
+            # Phase 1: Log tennis markets for observation (no betting yet)
+            tennis_markets = [m for m in markets if m.sport == Sport.TENNIS]
+            if tennis_markets:
+                await self._observe_tennis_markets(tennis_markets)
 
             # Evaluate each market with each strategy
             for market in markets:
@@ -519,6 +526,55 @@ class PaperTradingEngine:
 
         except Exception as e:
             logger.error("Error scanning markets", error=str(e))
+
+    async def _observe_tennis_markets(self, markets: list) -> None:
+        """
+        Phase 1: Observe and log tennis markets without placing bets.
+
+        This helps us understand:
+        - What markets are available
+        - Player names and formats used by Betfair
+        - Tournament names and how they map to surfaces
+        - Typical odds ranges and liquidity
+        """
+        from src.data.tennis_data import tennis_data_service
+
+        for market in markets:
+            # Extract player names from event_name (format: "Player1 v Player2")
+            if " v " in market.event_name:
+                parts = market.event_name.split(" v ")
+                if len(parts) == 2:
+                    player1, player2 = parts[0].strip(), parts[1].strip()
+
+                    # Get odds for each player
+                    p1_odds = None
+                    p2_odds = None
+                    for runner in market.runners:
+                        if player1.lower() in runner.name.lower():
+                            p1_odds = runner.best_back_price
+                        elif player2.lower() in runner.name.lower():
+                            p2_odds = runner.best_back_price
+
+                    # Log for observation
+                    logger.info(
+                        "TENNIS OBSERVATION",
+                        match=market.event_name,
+                        tournament=market.competition or "Unknown",
+                        player1=player1,
+                        player1_odds=f"{p1_odds:.2f}" if p1_odds else "N/A",
+                        player2=player2,
+                        player2_odds=f"{p2_odds:.2f}" if p2_odds else "N/A",
+                        volume=f"£{market.total_matched:.0f}",
+                        starts_in=f"{market.seconds_to_start / 60:.0f} mins",
+                        in_play=market.in_play,
+                    )
+
+                    # Use tennis data service to evaluate (Phase 1: just logs)
+                    await tennis_data_service.evaluate_match(
+                        player1=player1,
+                        player2=player2,
+                        tournament=market.competition or market.event_name,
+                    )
 
     async def manage_positions(self) -> None:
         """Manage open positions (for in-play strategies) and settle closed markets."""

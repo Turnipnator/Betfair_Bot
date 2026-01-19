@@ -32,6 +32,7 @@ logger = get_logger(__name__)
 EVENT_TYPE_IDS = {
     Sport.HORSE_RACING: "7",
     Sport.FOOTBALL: "1",
+    Sport.TENNIS: "2",
 }
 
 # Reverse mapping

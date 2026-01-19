@@ -15,6 +15,7 @@ class Sport(str, Enum):
 
     HORSE_RACING = "horse_racing"
     FOOTBALL = "football"
+    TENNIS = "tennis"
 
 
 class MarketStatus(str, Enum):

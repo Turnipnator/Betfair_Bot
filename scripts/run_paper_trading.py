@@ -568,6 +568,10 @@ class PaperTradingEngine:
     async def _settle_bet_from_market(self, bet: Bet, market) -> None:
         """Settle a bet based on market result."""
         try:
+            # Ensure bet has event_name for notifications
+            if hasattr(market, 'event_name') and market.event_name:
+                bet.event_name = market.event_name
+
             # Find the runner we bet on
             runner = None
             for r in market.runners:
@@ -585,9 +589,14 @@ class PaperTradingEngine:
 
             # If runner was removed (non-runner), void the bet
             if runner.status == "REMOVED":
-                self._simulator.void_bet(bet.id)
-                logger.info("Bet voided (non-runner)", bet_id=bet.bet_ref)
-                await notifier.bet_settled(bet)
+                if self._simulator.void_bet(bet.id):
+                    logger.info("Bet voided (non-runner)", bet_id=bet.bet_ref)
+                    await notifier.bet_settled(bet)
+                else:
+                    logger.warning(
+                        "Failed to void bet (already settled?)",
+                        bet_id=bet.bet_ref,
+                    )
                 return
 
             # Settle the bet
@@ -670,6 +679,8 @@ class PaperTradingEngine:
                         market = await market_repo.get(bet.market_id)
                         if market:
                             event_name = market.event_name
+                            # Set on bet object so notification includes match name
+                            bet.event_name = event_name
                 except Exception:
                     pass
 
@@ -808,6 +819,17 @@ class PaperTradingEngine:
                 cleared = cleared_by_id.get(bet.bet_ref)
                 if not cleared:
                     continue
+
+                # Get event_name for notification if not already set
+                if not bet.event_name:
+                    try:
+                        async with db.session() as session:
+                            market_repo = MarketRepository(session)
+                            market = await market_repo.get(bet.market_id)
+                            if market:
+                                bet.event_name = market.event_name
+                    except Exception:
+                        pass
 
                 # Determine result from Betfair's data
                 bet_outcome = cleared.get("bet_outcome")

@@ -8,8 +8,6 @@ services:
     network_mode: host
     env_file:
       - .env
-    environment:
-      - TRADING_MODE=paper
     volumes:
       # Persist data and logs
       - ./data:/app/data

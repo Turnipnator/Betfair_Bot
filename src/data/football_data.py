@@ -320,7 +320,7 @@ class FootballDataService:
         """
         self._cache: dict[str, LeagueStats] = {}
         self._cache_duration = timedelta(hours=cache_duration_hours)
-        self._client = httpx.AsyncClient(timeout=30.0)
+        self._client = httpx.AsyncClient(timeout=10.0)  # Short timeout to prevent blocking
 
     async def close(self):
         """Close the HTTP client."""

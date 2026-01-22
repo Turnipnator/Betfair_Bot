@@ -126,7 +126,7 @@ class StrategySettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="", extra="ignore")
 
     enabled_strategies: str = Field(
-        default="value_betting,lay_the_draw",
+        default="value_betting,lay_the_draw,lay_the_server",
         alias="ENABLED_STRATEGIES",
         description="Comma-separated list of enabled strategies",
     )

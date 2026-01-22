@@ -35,9 +35,9 @@ USER botuser
 ENV PYTHONUNBUFFERED=1
 ENV TRADING_MODE=paper
 
-# Health check
-HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
-    CMD python -c "import sys; sys.exit(0)"
+# Health check - verifies bot is actually running and logs are being written
+HEALTHCHECK --interval=60s --timeout=10s --start-period=60s --retries=3 \
+    CMD python scripts/healthcheck.py
 
 # Default command
 CMD ["python", "scripts/run_paper_trading.py"]

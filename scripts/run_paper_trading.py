@@ -30,6 +30,7 @@ from src.risk import risk_manager
 from src.strategies import (
     ValueBettingStrategy,
     LayTheDrawStrategy,
+    LayTheServerStrategy,
     ArbitrageStrategy,
 )
 from src.telegram_bot import telegram_bot, notifier
@@ -201,6 +202,7 @@ class PaperTradingEngine:
         strategy_map = {
             "value_betting": ValueBettingStrategy,
             "lay_the_draw": LayTheDrawStrategy,
+            "lay_the_server": LayTheServerStrategy,
             "arbitrage": ArbitrageStrategy,
         }
 
@@ -529,52 +531,17 @@ class PaperTradingEngine:
 
     async def _observe_tennis_markets(self, markets: list) -> None:
         """
-        Phase 1: Observe and log tennis markets without placing bets.
+        Log tennis markets being scanned.
 
-        This helps us understand:
-        - What markets are available
-        - Player names and formats used by Betfair
-        - Tournament names and how they map to surfaces
-        - Typical odds ranges and liquidity
+        Detailed evaluation with player stats is now handled by
+        the LayTheServerStrategy in the main evaluation loop.
         """
-        from src.data.tennis_data import tennis_data_service
-
-        for market in markets:
-            # Extract player names from event_name (format: "Player1 v Player2")
-            if " v " in market.event_name:
-                parts = market.event_name.split(" v ")
-                if len(parts) == 2:
-                    player1, player2 = parts[0].strip(), parts[1].strip()
-
-                    # Get odds for each player
-                    p1_odds = None
-                    p2_odds = None
-                    for runner in market.runners:
-                        if player1.lower() in runner.name.lower():
-                            p1_odds = runner.best_back_price
-                        elif player2.lower() in runner.name.lower():
-                            p2_odds = runner.best_back_price
-
-                    # Log for observation
-                    logger.info(
-                        "TENNIS OBSERVATION",
-                        match=market.event_name,
-                        tournament=market.competition or "Unknown",
-                        player1=player1,
-                        player1_odds=f"{p1_odds:.2f}" if p1_odds else "N/A",
-                        player2=player2,
-                        player2_odds=f"{p2_odds:.2f}" if p2_odds else "N/A",
-                        volume=f"£{market.total_matched:.0f}",
-                        starts_in=f"{market.seconds_to_start / 60:.0f} mins",
-                        in_play=market.in_play,
-                    )
-
-                    # Use tennis data service to evaluate (Phase 1: just logs)
-                    await tennis_data_service.evaluate_match(
-                        player1=player1,
-                        player2=player2,
-                        tournament=market.competition or market.event_name,
-                    )
+        if markets:
+            logger.debug(
+                "Tennis markets found",
+                count=len(markets),
+                tournaments=list(set(m.competition for m in markets if m.competition))[:5],
+            )
 
     async def manage_positions(self) -> None:
         """Manage open positions (for in-play strategies) and settle closed markets."""

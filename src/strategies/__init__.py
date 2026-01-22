@@ -11,6 +11,11 @@ from src.strategies.lay_the_draw import (
     LTDPosition,
     LTDState,
 )
+from src.strategies.lay_the_server import (
+    LayTheServerStrategy,
+    LTSPosition,
+    LTSState,
+)
 from src.strategies.arbitrage import (
     ArbOpportunity,
     ArbType,
@@ -25,10 +30,14 @@ __all__ = [
     "FootballValueStrategy",
     "HorseRacingValueStrategy",
     "ValueBettingStrategy",
-    # Lay the Draw
+    # Lay the Draw (Football)
     "LayTheDrawStrategy",
     "LTDPosition",
     "LTDState",
+    # Lay the Server (Tennis)
+    "LayTheServerStrategy",
+    "LTSPosition",
+    "LTSState",
     # Arbitrage
     "ArbOpportunity",
     "ArbType",

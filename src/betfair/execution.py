@@ -11,6 +11,7 @@ from enum import Enum
 from typing import Optional
 
 from betfairlightweight.exceptions import APIError
+from betfairlightweight.filters import place_instruction, limit_order
 
 from config import settings
 from config.logging_config import get_logger
@@ -113,48 +114,67 @@ class OrderExecutor:
         try:
             loop = asyncio.get_event_loop()
 
-            # Build order instruction
+            # Build order instruction using betfairlightweight filters
             persistence = "PERSIST" if persist else "LAPSE"
             side = "BACK" if signal.bet_type == BetType.BACK else "LAY"
 
-            instructions = [
-                {
-                    "selectionId": signal.selection_id,
-                    "handicap": 0,
-                    "side": side,
-                    "orderType": "LIMIT",
-                    "limitOrder": {
-                        "size": round(signal.stake, 2),
-                        "price": signal.odds,
-                        "persistenceType": persistence,
-                    },
-                }
-            ]
+            instruction = place_instruction(
+                selection_id=signal.selection_id,
+                side=side,
+                order_type="LIMIT",
+                limit_order=limit_order(
+                    size=round(signal.stake, 2),
+                    price=signal.odds,
+                    persistence_type=persistence,
+                ),
+            )
 
             # Place order
             response = await loop.run_in_executor(
                 None,
                 lambda: betfair_client._client.betting.place_orders(
                     market_id=signal.market_id,
-                    instructions=instructions,
+                    instructions=[instruction],
                 ),
             )
 
+            # betfairlightweight returns a PlaceOrders resource
             if response.status == "SUCCESS":
-                result = response.instruction_reports[0]
+                result = response.place_instruction_reports[0]
+                # Determine order status from size matched
+                size_matched = result.size_matched or 0.0
+                if size_matched >= signal.stake:
+                    order_status = OrderStatus.EXECUTION_COMPLETE
+                elif size_matched > 0:
+                    order_status = OrderStatus.EXECUTABLE
+                else:
+                    order_status = OrderStatus.PENDING
+
+                logger.info(
+                    "Betfair order response",
+                    bet_id=result.bet_id,
+                    status=order_status.value,
+                    size_matched=size_matched,
+                    avg_price=result.average_price_matched,
+                )
+
                 return OrderResult(
                     success=True,
                     bet_id=result.bet_id,
-                    status=OrderStatus(result.order_status),
-                    matched_size=result.size_matched or 0.0,
+                    status=order_status,
+                    matched_size=size_matched,
                     average_price=result.average_price_matched or signal.odds,
                 )
             else:
                 error = response.error_code or "Unknown error"
-                logger.error("Order placement failed", error=error)
+                logger.error(
+                    "Order placement failed",
+                    error=error,
+                    market_id=signal.market_id,
+                )
                 return OrderResult(
                     success=False,
-                    error_message=error,
+                    error_message=str(error),
                 )
 
         except APIError as e:

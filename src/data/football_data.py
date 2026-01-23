@@ -23,14 +23,9 @@ LEAGUE_URLS = {
     # England
     "E0": "https://www.football-data.co.uk/mmz4281/2526/E0.csv",  # Premier League
     "E1": "https://www.football-data.co.uk/mmz4281/2526/E1.csv",  # Championship
-    "E2": "https://www.football-data.co.uk/mmz4281/2526/E2.csv",  # League One
-    "E3": "https://www.football-data.co.uk/mmz4281/2526/E3.csv",  # League Two
-    "EC": "https://www.football-data.co.uk/mmz4281/2526/EC.csv",  # Conference
     # Scotland
     "SC0": "https://www.football-data.co.uk/mmz4281/2526/SC0.csv",  # Scottish Premiership
     "SC1": "https://www.football-data.co.uk/mmz4281/2526/SC1.csv",  # Scottish Championship
-    "SC2": "https://www.football-data.co.uk/mmz4281/2526/SC2.csv",  # Scottish League One
-    "SC3": "https://www.football-data.co.uk/mmz4281/2526/SC3.csv",  # Scottish League Two
     # Spain
     "SP1": "https://www.football-data.co.uk/mmz4281/2526/SP1.csv",  # La Liga
     "SP2": "https://www.football-data.co.uk/mmz4281/2526/SP2.csv",  # Segunda División
@@ -47,35 +42,19 @@ LEAGUE_URLS = {
     "P1": "https://www.football-data.co.uk/mmz4281/2526/P1.csv",  # Primeira Liga
     # Netherlands
     "N1": "https://www.football-data.co.uk/mmz4281/2526/N1.csv",  # Eredivisie
-    # Belgium
-    "B1": "https://www.football-data.co.uk/mmz4281/2526/B1.csv",  # Jupiler Pro League
-    # Turkey
-    "T1": "https://www.football-data.co.uk/mmz4281/2526/T1.csv",  # Süper Lig
-    # Greece
-    "G1": "https://www.football-data.co.uk/mmz4281/2526/G1.csv",  # Super League Greece
-    # Austria
-    "AUT": "https://www.football-data.co.uk/new/AUT.csv",  # Austrian Bundesliga
     # Denmark
     "DNK": "https://www.football-data.co.uk/new/DNK.csv",  # Danish Superliga
-    # Switzerland
-    "SWZ": "https://www.football-data.co.uk/new/SWZ.csv",  # Swiss Super League
 }
 
 # League tiers - Tier 1 = top division, Tier 2 = second division
 # Higher tiers are more predictable and get priority
 LEAGUE_TIERS = {
-    # Tier 1 - Top divisions (most data, most predictable)
+    # Tier 1 - Top divisions
     "E0": 1, "SP1": 1, "D1": 1, "I1": 1, "F1": 1,  # Big 5
-    "P1": 1, "N1": 1, "B1": 1, "T1": 1, "G1": 1,  # Other top European
-    "SC0": 1, "AUT": 1,  # Scotland/Austria top
-    "DNK": 1, "SWZ": 1,  # Denmark/Switzerland top
-    "NOR": 1, "SWE": 1, "POL": 1, "ROU": 1, "FIN": 1, "IRL": 1,  # Other European
+    "P1": 1, "N1": 1, "SC0": 1, "DNK": 1,  # Portugal, Netherlands, Scotland, Denmark
     # Tier 2 - Second divisions
     "E1": 2, "SP2": 2, "D2": 2, "I2": 2, "F2": 2,  # Big 5 second tier
     "SC1": 2,  # Scottish Championship
-    # Tier 3 - Third divisions and below
-    "E2": 3, "E3": 3, "EC": 3,  # English lower leagues
-    "SC2": 3, "SC3": 3,  # Scottish lower leagues
 }
 
 # Map common league names to codes

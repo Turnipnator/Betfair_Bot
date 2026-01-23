@@ -37,6 +37,7 @@ from src.telegram_bot import telegram_bot, notifier
 from src.reporting import report_generator, daily_report_generator
 from src.utils import calculate_stake, calculate_kelly_stake
 from src.data.football_data import football_data_service
+from src.betfair.execution import order_executor
 from src.streaming.stream_manager import StreamManager
 from src.streaming.ltd_monitor import LTDStreamMonitor
 
@@ -264,7 +265,7 @@ class PaperTradingEngine:
                 potential_profit=signal.stake * (signal.odds - 1),
                 potential_loss=signal.stake,
                 status=BetStatus.MATCHED,
-                is_paper=True,
+                is_paper=settings.is_paper_mode(),
                 placed_at=datetime.utcnow(),
             )
         )
@@ -401,8 +402,9 @@ class PaperTradingEngine:
 
         # Send startup notification
         if settings.telegram.is_configured():
+            mode_str = "LIVE" if settings.is_live_mode() else "Paper"
             await telegram_bot.send_message(
-                "Paper Trading Bot Started\n\n"
+                f"{'🔴 LIVE' if settings.is_live_mode() else '📝 Paper'} Trading Bot Started\n\n"
                 f"Bankroll: £{self._simulator.bankroll:.2f}\n"
                 f"Strategies: {', '.join(s.name for s in self._strategies)}\n"
                 f"Scan interval: {settings.market.market_scan_interval}s"
@@ -463,25 +465,21 @@ class PaperTradingEngine:
             # Build filter
             # Include major European leagues for football + tennis
             market_filter = MarketFilter(
-                sports=[Sport.HORSE_RACING, Sport.FOOTBALL, Sport.TENNIS],
+                sports=[Sport.HORSE_RACING, Sport.FOOTBALL],
                 market_types=["WIN", "MATCH_ODDS"],
                 countries=[
-                    "GB", "IE",  # UK & Ireland
-                    "ES",  # Spain (La Liga)
-                    "DE",  # Germany (Bundesliga)
-                    "IT",  # Italy (Serie A)
-                    "FR",  # France (Ligue 1)
+                    "GB",  # England & Scotland
+                    "ES",  # Spain (La Liga, Segunda)
+                    "DE",  # Germany (Bundesliga, 2. Bundesliga)
+                    "IT",  # Italy (Serie A, Serie B)
+                    "FR",  # France (Ligue 1, Ligue 2)
                     "PT",  # Portugal (Primeira Liga)
                     "NL",  # Netherlands (Eredivisie)
-                    "BE",  # Belgium (Jupiler Pro League)
-                    "TR",  # Turkey (Süper Lig)
-                    "GR",  # Greece (Super League)
-                    "AU",  # Australia (Australian Open)
-                    "US",  # USA (US Open, Miami, etc.)
+                    "DK",  # Denmark (Superligaen)
                 ],
                 from_hours=0.5,  # Starting in 30 mins
                 to_hours=12,  # Up to 12 hours ahead
-                max_results=150,  # Increased for tennis markets
+                max_results=100,
             )
 
             # Fetch markets
@@ -500,11 +498,6 @@ class PaperTradingEngine:
                 markets = []
 
             self._markets_scanned += len(markets)
-
-            # Phase 1: Log tennis markets for observation (no betting yet)
-            tennis_markets = [m for m in markets if m.sport == Sport.TENNIS]
-            if tennis_markets:
-                await self._observe_tennis_markets(tennis_markets)
 
             # Evaluate each market with each strategy
             for market in markets:
@@ -817,7 +810,7 @@ class PaperTradingEngine:
                 return
 
             # Only reconcile bets that have a Betfair bet reference
-            bets_with_ref = [b for b in open_bets if b.bet_ref and not b.bet_ref.startswith("PAPER_")]
+            bets_with_ref = [b for b in open_bets if b.bet_ref and not b.bet_ref.startswith("PAPER-")]
             if not bets_with_ref:
                 return
 
@@ -917,6 +910,104 @@ class PaperTradingEngine:
         except Exception as e:
             logger.error("Error reconciling with Betfair", error=str(e))
 
+    async def _place_live_bet(self, signal: BetSignal) -> tuple[bool, str, Optional[Bet]]:
+        """
+        Place a real bet on Betfair Exchange.
+
+        Performs risk checks, places the order via Betfair API,
+        then tracks the bet in the simulator for bankroll management.
+        """
+        # Risk checks (same as simulator does)
+        risk_check = risk_manager.check_bet_allowed(
+            stake=signal.stake,
+            odds=signal.odds,
+            bet_type=signal.bet_type,
+            market_id=signal.market_id,
+            bankroll=self._simulator.bankroll,
+        )
+
+        if not risk_check.allowed:
+            logger.info(
+                "Bet rejected by risk manager",
+                selection=signal.selection_name,
+                reason=risk_check.reason,
+                stake=signal.stake,
+            )
+            return False, risk_check.reason, None
+
+        # Use adjusted stake if risk manager modified it
+        if risk_check.adjusted_stake:
+            signal.stake = risk_check.adjusted_stake
+
+        # Balance check
+        if signal.bet_type == BetType.BACK:
+            required = signal.stake
+        else:
+            required = signal.stake * (signal.odds - 1)
+
+        if required > self._simulator.available_balance:
+            return False, f"Insufficient balance: need £{required:.2f}, have £{self._simulator.available_balance:.2f}", None
+
+        # Place on Betfair
+        logger.info(
+            "Placing LIVE bet on Betfair",
+            market_id=signal.market_id,
+            selection=signal.selection_name,
+            bet_type=signal.bet_type.value,
+            odds=signal.odds,
+            stake=signal.stake,
+            strategy=signal.strategy,
+        )
+
+        result = await order_executor.place_order(signal, persist=False)
+
+        if not result.success:
+            logger.error(
+                "Live bet placement FAILED",
+                error=result.error_message,
+                selection=signal.selection_name,
+            )
+            await telegram_bot.send_message(
+                f"⚠️ BET FAILED: {signal.selection_name}\n"
+                f"Error: {result.error_message}"
+            )
+            return False, result.error_message or "Order failed", None
+
+        # Create Bet object with real Betfair bet_ref
+        bet = Bet.from_signal(signal, is_paper=False)
+        bet.bet_ref = result.bet_id
+        bet.matched_odds = result.average_price or signal.odds
+        bet.stake = result.matched_size or signal.stake
+        bet.status = BetStatus.MATCHED
+        bet.matched_at = datetime.utcnow()
+
+        # Calculate potential outcomes
+        if bet.bet_type == BetType.BACK:
+            bet.potential_profit = bet.stake * (bet.matched_odds - 1)
+            bet.potential_loss = bet.stake
+        else:
+            bet.potential_profit = bet.stake
+            bet.potential_loss = bet.stake * (bet.matched_odds - 1)
+
+        # Track in simulator for bankroll management
+        self._simulator._bet_counter += 1
+        bet.id = self._simulator._bet_counter
+        self._simulator._bets[bet.id] = bet
+        self._simulator._reserved += bet.potential_loss
+        self._simulator._total_bets += 1
+        risk_manager.add_open_position(bet)
+
+        logger.info(
+            "LIVE bet placed successfully",
+            bet_ref=result.bet_id,
+            matched_odds=bet.matched_odds,
+            matched_size=bet.stake,
+            selection=signal.selection_name,
+            match=signal.event_name,
+        )
+
+        return True, f"Live order placed: {result.bet_id}", bet
+
     async def process_signal(self, signal: BetSignal) -> None:
         """Process a betting signal."""
         if not self._simulator:
@@ -938,7 +1029,7 @@ class PaperTradingEngine:
                 async with db.session() as session:
                     bet_repo = BetRepository(session)
                     existing = await bet_repo.get_by_market(signal.market_id)
-                    if any(b.strategy == signal.strategy and b.is_paper for b in existing):
+                    if any(b.strategy == signal.strategy for b in existing):
                         logger.debug(
                             "Skipping signal - already have bet on this market (database)",
                             strategy=signal.strategy,
@@ -993,8 +1084,11 @@ class PaperTradingEngine:
                     # Fall back to flat percentage staking
                     signal.stake = calculate_stake(self._simulator.available_balance)
 
-            # Place through simulator (includes risk checks)
-            success, message, bet = self._simulator.place_order(signal)
+            # Place the bet - live or paper mode
+            if settings.is_live_mode():
+                success, message, bet = await self._place_live_bet(signal)
+            else:
+                success, message, bet = self._simulator.place_order(signal)
 
             if success and bet:
                 # Track this market to prevent duplicates
@@ -1007,11 +1101,12 @@ class PaperTradingEngine:
                 self._bets_today += 1
 
                 logger.info(
-                    "Paper bet placed",
+                    "Bet placed" if settings.is_live_mode() else "Paper bet placed",
                     bet_id=bet.bet_ref,
                     selection=signal.selection_name,
                     odds=signal.odds,
                     stake=bet.stake,
+                    mode="LIVE" if settings.is_live_mode() else "PAPER",
                 )
 
                 # Try to save to database (non-fatal if fails)
@@ -1187,7 +1282,7 @@ async def main() -> None:
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("  BETFAIR PAPER TRADING BOT")
+    print(f"  BETFAIR {'PAPER ' if settings.is_paper_mode() else 'LIVE '}TRADING BOT")
     print("=" * 60)
     print(f"  Mode:      {'PAPER' if settings.is_paper_mode() else 'LIVE'}")
     print(f"  Bankroll:  £{settings.paper_bankroll}")

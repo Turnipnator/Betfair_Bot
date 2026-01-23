@@ -88,18 +88,21 @@ class PaperTradingEngine:
         # Initialize database
         await db.initialize()
 
-        # Calculate bankroll from database: starting + sum of all settled P&L
+        # Calculate bankroll from database: starting + sum of settled P&L
         async with db.session() as session:
             bet_repo = BetRepository(session)
 
-            # Get total P&L from all settled paper bets
-            total_pnl = await bet_repo.get_total_pnl(is_paper=True)
+            # In live mode, only count P&L from real bets
+            # In paper mode, count paper bet P&L
+            is_paper = settings.is_paper_mode()
+            total_pnl = await bet_repo.get_total_pnl(is_paper=is_paper)
 
             # Calculate current bankroll
             current = settings.paper_bankroll + total_pnl
 
             logger.info(
                 "Calculated bankroll from database",
+                mode="PAPER" if is_paper else "LIVE",
                 starting=settings.paper_bankroll,
                 total_pnl=total_pnl,
                 current=current,
@@ -110,7 +113,7 @@ class PaperTradingEngine:
 
             # Load open bets from database (from previous runs)
             bet_repo = BetRepository(session)
-            open_bet_records = await bet_repo.get_open()
+            open_bet_records = await bet_repo.get_open(is_paper=is_paper)
             if open_bet_records:
                 # Convert BetRecord to Bet objects
                 open_bets = []
@@ -947,6 +950,15 @@ class PaperTradingEngine:
 
         if required > self._simulator.available_balance:
             return False, f"Insufficient balance: need £{required:.2f}, have £{self._simulator.available_balance:.2f}", None
+
+        # Safety check: verify no existing orders on this market (prevents duplicates)
+        if await betfair_client.has_open_orders(signal.market_id):
+            logger.warning(
+                "Duplicate prevented - existing orders found on Betfair",
+                market_id=signal.market_id,
+                selection=signal.selection_name,
+            )
+            return False, "Existing orders found on market", None
 
         # Place on Betfair
         logger.info(

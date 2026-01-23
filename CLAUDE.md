@@ -1,3 +1,7 @@
+> **Common Patterns**: See `~/trading-bot-skill.md` for deployment, Docker, Telegram, and strategy patterns shared across all trading bots.
+
+---
+
 # CLAUDE.md - Betfair Exchange Trading Bot
 
 ## What We're Building

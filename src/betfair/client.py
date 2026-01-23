@@ -374,6 +374,40 @@ class BetfairClient:
             logger.warning("Error updating market prices", error=str(e))
             return market
 
+    async def has_open_orders(self, market_id: str) -> bool:
+        """
+        Check if we already have open orders on a market.
+
+        Used as a safety check before placing live bets to prevent duplicates
+        even if in-memory tracking fails.
+        """
+        if not self.is_logged_in:
+            return False
+
+        try:
+            loop = asyncio.get_event_loop()
+            orders = await loop.run_in_executor(
+                None,
+                lambda: self._client.betting.list_current_orders(
+                    market_ids=[market_id],
+                ),
+            )
+
+            if orders and orders.orders:
+                logger.info(
+                    "Found existing orders on market",
+                    market_id=market_id,
+                    count=len(orders.orders),
+                )
+                return True
+
+            return False
+
+        except Exception as e:
+            logger.warning("Error checking open orders", error=str(e))
+            # If we can't check, assume there might be orders (safer)
+            return False
+
     async def get_cleared_orders(
         self,
         from_hours: int = 24,

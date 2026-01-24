@@ -828,14 +828,20 @@ class PaperTradingEngine:
             if not cleared_orders:
                 return
 
-            # Index cleared orders by bet_id for fast lookup
-            cleared_by_id = {order["bet_id"]: order for order in cleared_orders}
+            # Index cleared orders by bet_id (as string) for fast lookup
+            cleared_by_id = {str(order["bet_id"]): order for order in cleared_orders}
+
+            logger.info(
+                "Reconciliation matching",
+                open_bet_refs=[b.bet_ref for b in bets_with_ref],
+                cleared_bet_ids=list(cleared_by_id.keys())[:10],
+            )
 
             reconciled_count = 0
 
             for bet in bets_with_ref:
                 # Check if this bet has been settled by Betfair
-                cleared = cleared_by_id.get(bet.bet_ref)
+                cleared = cleared_by_id.get(str(bet.bet_ref))
                 if not cleared:
                     continue
 
@@ -852,15 +858,20 @@ class PaperTradingEngine:
 
                 # Determine result from Betfair's data
                 bet_outcome = cleared.get("bet_outcome")
-                profit = cleared.get("profit", 0)
+                profit = cleared.get("profit") or 0.0
+                commission = cleared.get("commission") or 0.0
 
-                if bet_outcome == "WON":
-                    selection_won = True
-                elif bet_outcome == "LOST":
-                    selection_won = False
-                else:
+                if bet_outcome not in ("WON", "LOST"):
                     # Voided or unknown - skip for now
                     continue
+
+                # Betfair's bet_outcome tells us if the BET won, not if the selection won.
+                # For BACK bets: BET WON = selection happened
+                # For LAY bets: BET WON = selection did NOT happen (inverted)
+                if bet.bet_type == BetType.LAY:
+                    selection_won = (bet_outcome == "LOST")  # LAY lost = draw happened
+                else:
+                    selection_won = (bet_outcome == "WON")  # BACK won = selection happened
 
                 # Settle the bet using Betfair's actual P&L
                 success, _ = self._simulator.settle_bet(bet.id, selection_won)
@@ -868,7 +879,7 @@ class PaperTradingEngine:
                 if success:
                     # Override with Betfair's actual profit (includes exact commission)
                     bet.profit_loss = profit
-                    bet.commission = cleared.get("commission", 0)
+                    bet.commission = commission
 
                     reconciled_count += 1
 
@@ -888,7 +899,7 @@ class PaperTradingEngine:
                                     bet.id,
                                     bet.result,
                                     profit,  # Use Betfair's actual P&L
-                                    cleared.get("commission", 0),
+                                    commission,
                                 )
                                 await session.commit()
                     except Exception as db_error:
@@ -952,7 +963,9 @@ class PaperTradingEngine:
             return False, f"Insufficient balance: need £{required:.2f}, have £{self._simulator.available_balance:.2f}", None
 
         # Safety check: verify no existing orders on this market (prevents duplicates)
-        if await betfair_client.has_open_orders(signal.market_id):
+        # Skip for LTD hedge bets (BACK on a market where we already have a LAY entry)
+        is_hedge = (signal.strategy == "ltd_hedge" and signal.bet_type == BetType.BACK)
+        if not is_hedge and await betfair_client.has_open_orders(signal.market_id):
             logger.warning(
                 "Duplicate prevented - existing orders found on Betfair",
                 market_id=signal.market_id,
@@ -1026,34 +1039,38 @@ class PaperTradingEngine:
             return
 
         try:
-            # Check if we already have a bet on this market for this strategy (in-memory)
-            strategy_markets = self._markets_with_bets.get(signal.strategy, set())
-            if signal.market_id in strategy_markets:
-                logger.debug(
-                    "Skipping signal - already have bet on this market (memory)",
-                    strategy=signal.strategy,
-                    market_id=signal.market_id,
-                )
-                return
+            # LTD hedge bets (BACK on a market where we already have a LAY) skip duplicate checks
+            is_hedge = (signal.strategy == "ltd_hedge" and signal.bet_type == BetType.BACK)
 
-            # Also check database to catch bets from previous sessions
-            try:
-                async with db.session() as session:
-                    bet_repo = BetRepository(session)
-                    existing = await bet_repo.get_by_market(signal.market_id)
-                    if any(b.strategy == signal.strategy for b in existing):
-                        logger.debug(
-                            "Skipping signal - already have bet on this market (database)",
-                            strategy=signal.strategy,
-                            market_id=signal.market_id,
-                        )
-                        # Add to memory tracking to avoid repeat DB checks
-                        if signal.strategy not in self._markets_with_bets:
-                            self._markets_with_bets[signal.strategy] = set()
-                        self._markets_with_bets[signal.strategy].add(signal.market_id)
-                        return
-            except Exception as db_err:
-                logger.warning("DB check failed, proceeding with bet", error=str(db_err)[:50])
+            if not is_hedge:
+                # Check if we already have a bet on this market for this strategy (in-memory)
+                strategy_markets = self._markets_with_bets.get(signal.strategy, set())
+                if signal.market_id in strategy_markets:
+                    logger.debug(
+                        "Skipping signal - already have bet on this market (memory)",
+                        strategy=signal.strategy,
+                        market_id=signal.market_id,
+                    )
+                    return
+
+                # Also check database to catch bets from previous sessions
+                try:
+                    async with db.session() as session:
+                        bet_repo = BetRepository(session)
+                        existing = await bet_repo.get_by_market(signal.market_id)
+                        if any(b.strategy == signal.strategy for b in existing):
+                            logger.debug(
+                                "Skipping signal - already have bet on this market (database)",
+                                strategy=signal.strategy,
+                                market_id=signal.market_id,
+                            )
+                            # Add to memory tracking to avoid repeat DB checks
+                            if signal.strategy not in self._markets_with_bets:
+                                self._markets_with_bets[signal.strategy] = set()
+                            self._markets_with_bets[signal.strategy].add(signal.market_id)
+                            return
+                except Exception as db_err:
+                    logger.warning("DB check failed, proceeding with bet", error=str(db_err)[:50])
 
             # Check if match is covered by football-data.co.uk (for settlement)
             # Only applies to paper mode football markets

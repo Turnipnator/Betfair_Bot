@@ -192,8 +192,8 @@ class StreamingSettings(BaseSettings):
         description="Maximum reconnection delay (seconds)",
     )
     goal_threshold: float = Field(
-        default=1.3,
-        description="Odds spike threshold for goal detection (1.3 = 30% increase)",
+        default=1.2,
+        description="Odds spike threshold for goal detection (1.2 = 20% increase)",
     )
 
 

@@ -91,6 +91,11 @@ class StreamManager:
         self._process_task: Optional[asyncio.Task] = None
         self._reconnect_task: Optional[asyncio.Task] = None
 
+        # Stream thread tracking
+        self._stream_thread: Optional[threading.Thread] = None
+        self._last_update_time: Optional[float] = None
+        self._heartbeat_timeout = (heartbeat_ms / 1000) * 4  # 4x heartbeat = dead
+
         # Reconnection settings
         self._reconnect_delay = 5  # seconds
         self._max_reconnect_delay = 60
@@ -138,18 +143,17 @@ class StreamManager:
             # Create output queue for streaming data
             self._output_queue = queue.Queue()
 
-            # Create listener
+            # Create listener (no max_latency to avoid silent update drops)
             self._listener = StreamListener(
                 output_queue=self._output_queue,
-                max_latency=0.5,
                 lightweight=False,
             )
 
-            # Create stream
+            # Create stream (large buffer for in-play data which can be several KB)
             self._stream = self._client.streaming.create_stream(
                 listener=self._listener,
                 timeout=64,
-                buffer_size=1024,
+                buffer_size=65536,
             )
 
             # CRITICAL: Subscribe BEFORE starting the stream
@@ -181,18 +185,24 @@ class StreamManager:
             # Now start the stream - this connects and sends the buffered subscription
             # Start in a background daemon thread since stream.start() blocks forever
             logger.info("Starting stream (subscription will be sent on connect)")
-            stream_thread = threading.Thread(target=self._stream.start, daemon=True)
-            stream_thread.start()
+            self._stream_thread = threading.Thread(
+                target=self._run_stream_thread, daemon=True, name="betfair-stream"
+            )
+            self._stream_thread.start()
 
             # Give the stream a moment to connect and establish subscription
             await asyncio.sleep(3)
 
-            # Don't rely on stream.running - it may not be immediately true
-            # Just proceed and handle errors in the update processor
-            logger.info("Stream started, assuming connection established")
+            # Check if stream thread is still alive (might have crashed on connect)
+            if not self._stream_thread.is_alive():
+                logger.error("Stream thread died during startup")
+                return False
+
+            logger.info("Stream started, thread alive")
 
             self._connected = True
             self._running = True
+            self._last_update_time = asyncio.get_event_loop().time()
             self._current_reconnect_delay = self._reconnect_delay
 
             # Start processing updates
@@ -234,6 +244,25 @@ class StreamManager:
         self._subscription_id = None
 
         logger.info("Disconnected from Betfair streaming")
+
+    def _run_stream_thread(self) -> None:
+        """Run the stream in a thread with error handling."""
+        try:
+            logger.info("Stream thread starting")
+            self._stream.start()
+            # start() returned normally - stream closed by server or stopped
+            logger.warning(
+                "Stream thread: start() returned normally (connection closed)",
+                running=self._stream.running if self._stream else None,
+            )
+        except Exception as e:
+            logger.error(
+                "Stream thread crashed with exception",
+                error=str(e),
+                error_type=type(e).__name__,
+            )
+        finally:
+            self._connected = False
 
     async def subscribe(self, market_ids: list[str]) -> bool:
         """
@@ -344,21 +373,60 @@ class StreamManager:
 
     async def _process_updates(self) -> None:
         """Background task to process streaming updates."""
-        logger.debug("Started processing streaming updates")
+        logger.info("Stream update processor started")
+        loop = asyncio.get_running_loop()
+        last_alive_log = loop.time()
 
         while self._running:
             try:
                 # Check for updates (non-blocking with timeout)
                 try:
-                    update = await asyncio.get_event_loop().run_in_executor(
+                    update = await loop.run_in_executor(
                         None,
-                        lambda: self._output_queue.get(timeout=1.0)
+                        lambda: self._output_queue.get(timeout=2.0)
                     )
                 except queue.Empty:
-                    # Check if stream is still running
-                    if self._stream and not self._stream.running:
-                        logger.warning("Stream stopped unexpectedly")
+                    # Check stream health
+                    now = loop.time()
+
+                    # Log alive status every 60 seconds
+                    if now - last_alive_log > 60:
+                        thread_alive = self._stream_thread.is_alive() if self._stream_thread else False
+                        # Check stream's own last-received time (includes heartbeats)
+                        stream_last_recv = None
+                        if self._stream and hasattr(self._stream, 'datetime_last_received'):
+                            stream_last_recv = self._stream.datetime_last_received
+                        logger.info(
+                            "Stream processor alive",
+                            thread_alive=thread_alive,
+                            stream_last_recv=str(stream_last_recv) if stream_last_recv else "never",
+                            queue_size=self._output_queue.qsize() if self._output_queue else 0,
+                        )
+                        last_alive_log = now
+
+                    # Check if stream thread died (primary liveness check)
+                    if self._stream_thread and not self._stream_thread.is_alive():
+                        logger.warning("Stream thread is dead, triggering reconnect")
                         await self._handle_disconnect()
+                        break
+
+                    # Check stream's socket-level heartbeat (includes heartbeats,
+                    # not just price updates). This catches dead connections that
+                    # the thread hasn't detected yet.
+                    if self._stream and hasattr(self._stream, 'datetime_last_received'):
+                        last_recv = self._stream.datetime_last_received
+                        if last_recv:
+                            from datetime import datetime
+                            recv_age = (datetime.utcnow() - last_recv).total_seconds()
+                            if recv_age > self._heartbeat_timeout:
+                                logger.warning(
+                                    "Stream socket heartbeat timeout",
+                                    last_recv_ago=f"{recv_age:.0f}s",
+                                    timeout=self._heartbeat_timeout,
+                                )
+                                await self._handle_disconnect()
+                                break
+
                     continue
 
                 # Process the update
@@ -371,7 +439,7 @@ class StreamManager:
                 logger.error("Error processing stream update", error=str(e))
                 await asyncio.sleep(0.1)
 
-        logger.debug("Stopped processing streaming updates")
+        logger.info("Stream update processor stopped")
 
     async def _handle_update(self, update: Any) -> None:
         """
@@ -384,6 +452,8 @@ class StreamManager:
             # The update is a list of MarketBook objects
             if not update:
                 return
+
+            logger.debug("Stream update received", items=len(update) if hasattr(update, '__len__') else 1)
 
             for market_book in update:
                 market_update = self._parse_market_book(market_book)
@@ -469,6 +539,13 @@ class StreamManager:
         if not self._running:
             return
 
+        # Stop old stream if still running
+        if self._stream:
+            try:
+                self._stream.stop()
+            except Exception:
+                pass
+
         logger.warning(
             "Stream disconnected, will reconnect",
             delay=self._current_reconnect_delay,
@@ -480,22 +557,22 @@ class StreamManager:
 
     async def _reconnect(self) -> None:
         """Attempt to reconnect to streaming."""
+        # Save subscribed markets before connect() clears them
+        markets_to_resubscribe = list(self._subscribed_markets) if self._subscribed_markets else []
+
         while self._running and not self._connected:
             logger.info(
                 "Attempting to reconnect",
                 delay=self._current_reconnect_delay,
+                markets=markets_to_resubscribe,
             )
 
             await asyncio.sleep(self._current_reconnect_delay)
 
-            # Try to reconnect
-            if await self.connect():
-                # Re-subscribe to markets
-                if self._subscribed_markets:
-                    await self.subscribe(list(self._subscribed_markets))
-
+            # Pass markets as initial_market_ids to avoid Betfair's 15s idle timeout
+            if await self.connect(initial_market_ids=markets_to_resubscribe or None):
                 self._current_reconnect_delay = self._reconnect_delay
-                logger.info("Reconnected to streaming")
+                logger.info("Reconnected to streaming successfully")
                 return
 
             # Exponential backoff

@@ -6,6 +6,7 @@ Detects goals in real-time and triggers automatic hedging.
 """
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Optional, Awaitable
@@ -18,8 +19,8 @@ from src.utils import calculate_hedge_stake, round_to_tick
 logger = get_logger(__name__)
 
 
-# Goal detection threshold - odds must spike 30% above entry
-GOAL_ODDS_SPIKE_THRESHOLD = 1.3
+# Goal detection threshold - odds must spike 20% above entry
+GOAL_ODDS_SPIKE_THRESHOLD = 1.2
 
 # Minimum odds spike to consider (avoid false positives from small fluctuations)
 MIN_ODDS_CHANGE = 0.3
@@ -86,6 +87,9 @@ class LTDStreamMonitor:
 
         # Running state
         self._running = False
+
+        # Periodic logging (every 30s)
+        self._last_odds_log: float = 0
 
     @property
     def position_count(self) -> int:
@@ -260,6 +264,19 @@ class LTDStreamMonitor:
 
         # Store for tracking
         position.last_draw_odds = current_back_odds
+
+        # Log odds periodically (every 30s) to confirm streaming is delivering data
+        now = time.time()
+        if now - self._last_odds_log > 30:
+            self._last_odds_log = now
+            logger.info(
+                "LTD streaming odds update",
+                match=position.event_name,
+                draw_odds=current_back_odds,
+                entry_odds=position.entry_odds,
+                threshold=round(position.entry_odds * self._goal_threshold, 2),
+                in_play=update.in_play,
+            )
 
         # Only check for goals when in-play
         if not update.in_play:

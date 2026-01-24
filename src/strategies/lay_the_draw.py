@@ -327,9 +327,18 @@ class LayTheDrawStrategy(BaseStrategy):
 
         current_draw_odds = draw_runner.best_back_price
 
+        logger.info(
+            "LTD position check",
+            match=market.event_name,
+            current_draw_odds=current_draw_odds,
+            entry_odds=position.entry_odds,
+            threshold=round(position.entry_odds * 1.2, 2),
+            state=position.state.value,
+        )
+
         # Detect if goal has been scored
-        # Draw odds typically crash after a goal
-        goal_likely_scored = current_draw_odds > position.entry_odds * 1.3
+        # Draw odds typically spike after a goal (draw less likely)
+        goal_likely_scored = current_draw_odds >= position.entry_odds * 1.2
 
         if goal_likely_scored and position.state == LTDState.POSITION_OPEN:
             position.state = LTDState.GOAL_SCORED
@@ -379,7 +388,7 @@ class LayTheDrawStrategy(BaseStrategy):
             bet_type=BetType.BACK,  # Back to close the lay
             odds=exit_odds,
             stake=hedge_stake,
-            strategy=self.name,
+            strategy="ltd_hedge",  # Use ltd_hedge to bypass duplicate check
             sport=Sport.FOOTBALL,
             market_name=market.market_name,
             event_name=market.event_name,

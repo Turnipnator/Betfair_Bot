@@ -88,28 +88,43 @@ class PaperTradingEngine:
         # Initialize database
         await db.initialize()
 
-        # Calculate bankroll from database: starting + sum of settled P&L
-        async with db.session() as session:
-            bet_repo = BetRepository(session)
+        # Get bankroll - from Betfair in LIVE mode, calculated in PAPER mode
+        is_paper = settings.is_paper_mode()
 
-            # In live mode, only count P&L from real bets
-            # In paper mode, count paper bet P&L
-            is_paper = settings.is_paper_mode()
-            total_pnl = await bet_repo.get_total_pnl(is_paper=is_paper)
+        if not is_paper and betfair_client.is_logged_in:
+            # LIVE MODE: Get actual balance from Betfair (single source of truth)
+            try:
+                available, exposure, current = await betfair_client.get_account_funds()
+                logger.info(
+                    "Got bankroll from Betfair",
+                    mode="LIVE",
+                    available=available,
+                    exposure=exposure,
+                    total=current,
+                )
+            except Exception as e:
+                logger.error("Failed to get Betfair balance, using fallback", error=str(e))
+                # Fallback to database calculation
+                async with db.session() as session:
+                    bet_repo = BetRepository(session)
+                    total_pnl = await bet_repo.get_total_pnl(is_paper=False)
+                    current = settings.paper_bankroll + total_pnl
+        else:
+            # PAPER MODE: Calculate from starting bankroll + P&L
+            async with db.session() as session:
+                bet_repo = BetRepository(session)
+                total_pnl = await bet_repo.get_total_pnl(is_paper=True)
+                current = settings.paper_bankroll + total_pnl
+                logger.info(
+                    "Calculated bankroll from database",
+                    mode="PAPER",
+                    starting=settings.paper_bankroll,
+                    total_pnl=total_pnl,
+                    current=current,
+                )
 
-            # Calculate current bankroll
-            current = settings.paper_bankroll + total_pnl
-
-            logger.info(
-                "Calculated bankroll from database",
-                mode="PAPER" if is_paper else "LIVE",
-                starting=settings.paper_bankroll,
-                total_pnl=total_pnl,
-                current=current,
-            )
-
-            # Initialize simulator with correct bankroll
-            self._simulator = PaperTradingSimulator(current)
+        # Initialize simulator with correct bankroll
+        self._simulator = PaperTradingSimulator(current)
 
             # Load open bets from database (from previous runs)
             bet_repo = BetRepository(session)

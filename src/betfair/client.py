@@ -146,6 +146,29 @@ class BetfairClient:
             self._logged_in = False
             return False
 
+    async def get_account_funds(self) -> tuple[float, float, float]:
+        """
+        Get account balance from Betfair.
+
+        Returns:
+            Tuple of (available_to_bet, exposure, total_funds)
+        """
+        if not self.is_logged_in:
+            raise RuntimeError("Not logged in to Betfair")
+
+        try:
+            loop = asyncio.get_event_loop()
+            funds = await loop.run_in_executor(
+                None, self._client.account.get_account_funds
+            )
+            available = funds.available_to_bet_balance
+            exposure = funds.exposure  # This is negative when we have exposure
+            total = available + abs(exposure)
+            return available, exposure, total
+        except Exception as e:
+            logger.error("Failed to get account funds", error=str(e))
+            raise
+
     async def get_markets(self, filter: MarketFilter) -> list[Market]:
         """
         Discover markets matching the filter criteria.

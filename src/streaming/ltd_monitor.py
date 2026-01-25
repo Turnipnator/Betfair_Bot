@@ -377,9 +377,9 @@ class LTDStreamMonitor:
             )
             return  # Don't hedge yet
 
-        # "Let winners run" - Don't hedge in late game (85+ match mins = ~100 wall clock)
+        # "Let winners run" - Don't hedge at/after full time (90 match mins = ~105 wall clock)
         # At this point, just let the LAY win outright
-        max_hedge_mins = 100
+        max_hedge_mins = 105
         if minutes_elapsed > max_hedge_mins:
             logger.info(
                 "GOAL DETECTED - Late game, letting LAY win (no hedge)",

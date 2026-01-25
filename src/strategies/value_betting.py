@@ -715,6 +715,7 @@ class ValueBettingStrategy(BaseStrategy):
             event_name=market.event_name,
             competition=market.competition,
             reason=f"Value edge of {edge:.1%} at odds {odds:.2f}",
+            market_start_time=market.start_time,
         )
 
     def manage_position(

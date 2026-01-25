@@ -276,6 +276,7 @@ class LayTheDrawStrategy(BaseStrategy):
             event_name=market.event_name,
             competition=market.competition,
             reason=f"LTD entry: Draw @ {draw_odds:.2f}",
+            market_start_time=market.start_time,
         )
 
         self.log_signal(signal)
@@ -445,6 +446,7 @@ class LayTheDrawStrategy(BaseStrategy):
             event_name=market.event_name,
             competition=market.competition,
             reason=f"LTD exit ({reason}): Back @ {exit_odds:.2f}",
+            market_start_time=market.start_time,
         )
 
         position.exit_odds = exit_odds

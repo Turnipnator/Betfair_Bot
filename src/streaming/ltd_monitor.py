@@ -523,6 +523,7 @@ class LTDStreamMonitor:
                 market_name="Match Odds",
                 event_name=position.event_name,
                 reason=f"LTD streaming hedge: Goal detected @ {hedge_odds:.2f}",
+                market_start_time=position.market_start_time,
             )
 
         except Exception as e:

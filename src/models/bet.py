@@ -70,6 +70,7 @@ class BetSignal:
 
     # Timing
     signal_time: datetime = field(default_factory=datetime.utcnow)
+    market_start_time: Optional[datetime] = None  # Actual kick-off time from Betfair
 
     @property
     def potential_profit(self) -> float:

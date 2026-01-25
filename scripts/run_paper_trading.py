@@ -1216,13 +1216,15 @@ class PaperTradingEngine:
                             # Create minimal market record from signal data
                             from src.models import Market, MarketStatus
                             from datetime import datetime
+                            # Use actual start_time from signal (from Betfair), fallback to now
+                            actual_start_time = signal.market_start_time or datetime.utcnow()
                             minimal_market = Market(
                                 market_id=signal.market_id,
                                 market_name=signal.market_name or "Unknown",
                                 event_name=signal.event_name or "Unknown",
                                 sport=signal.sport,
                                 market_type="WIN" if signal.sport and signal.sport.value == "horse_racing" else "MATCH_ODDS",
-                                start_time=datetime.utcnow(),  # Approximate
+                                start_time=actual_start_time,
                                 status=MarketStatus.OPEN,
                             )
                             await market_repo.save(minimal_market)

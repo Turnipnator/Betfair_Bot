@@ -348,6 +348,20 @@ class LTDStreamMonitor:
             elapsed = now - start
             minutes_elapsed = elapsed.total_seconds() / 60
 
+        # Sanity check: if elapsed time is unreasonable (>120 mins), the start_time
+        # is probably wrong (e.g., set to bet placement time instead of kick-off).
+        # In this case, let polling handle it with more accurate time tracking.
+        if minutes_elapsed > 120:
+            logger.warning(
+                "GOAL DETECTED - Elapsed time unreasonable, deferring to polling",
+                match=position.event_name,
+                market_id=position.market_id,
+                minutes_elapsed=round(minutes_elapsed),
+                current_odds=current_odds,
+                entry_odds=position.entry_odds,
+            )
+            return  # Let polling handle it
+
         # Wait until half-time (50 mins from kick-off = 45 min first half + 5 mins into break)
         # First-half goals wait until half-time, second-half goals hedge immediately
         half_time_mins = 50

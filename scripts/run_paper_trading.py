@@ -315,7 +315,7 @@ class PaperTradingEngine:
         try:
             async with db.session() as session:
                 from sqlalchemy import select, func
-                from src.database.models import BetRecord
+                from src.database.schema import BetRecord
                 # Check for any ltd_hedge bets on this market
                 result = await session.execute(
                     select(func.count(BetRecord.id))

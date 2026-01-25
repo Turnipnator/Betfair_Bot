@@ -341,21 +341,42 @@ class LayTheDrawStrategy(BaseStrategy):
         goal_likely_scored = current_draw_odds >= position.entry_odds * 1.2
 
         if goal_likely_scored and position.state == LTDState.POSITION_OPEN:
+            # Check if 60 minutes have elapsed before hedging
+            # This allows for potential second goal which would give bigger profit
+            minutes_elapsed = 0
+            if market.start_time:
+                from datetime import timezone
+                now = datetime.now(timezone.utc)
+                # Handle naive datetime from market
+                start = market.start_time
+                if start.tzinfo is None:
+                    start = start.replace(tzinfo=timezone.utc)
+                elapsed = now - start
+                minutes_elapsed = elapsed.total_seconds() / 60
+
+            if minutes_elapsed < 60:
+                logger.info(
+                    "LTD: Goal detected but waiting for 60 mins before hedge",
+                    match=market.event_name,
+                    minutes_elapsed=round(minutes_elapsed),
+                    current_odds=current_draw_odds,
+                    entry_odds=position.entry_odds,
+                )
+                return None
+
             position.state = LTDState.GOAL_SCORED
             position.updated_at = datetime.utcnow()
 
             # Trade out for profit
             return self._create_exit_signal(market, draw_runner, position, "goal")
 
-        # Check time-based cut loss
-        # Would need actual match time from external data
-        # For now, check if draw odds have drifted badly without goal
-        if position.state == LTDState.POSITION_OPEN:
-            # If draw odds shortened significantly (match going nowhere)
-            if current_draw_odds < position.entry_odds * 0.8:
-                position.state = LTDState.LOSS_CUT
-                position.updated_at = datetime.utcnow()
-                return self._create_exit_signal(market, draw_runner, position, "cut_loss")
+        # Cut loss feature DISABLED - trust the strategy's game selection
+        # to pick matches that won't finish 0-0
+        # if position.state == LTDState.POSITION_OPEN:
+        #     if current_draw_odds < position.entry_odds * 0.8:
+        #         position.state = LTDState.LOSS_CUT
+        #         position.updated_at = datetime.utcnow()
+        #         return self._create_exit_signal(market, draw_runner, position, "cut_loss")
 
         return None
 

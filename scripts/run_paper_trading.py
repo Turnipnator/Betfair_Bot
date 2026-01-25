@@ -346,14 +346,16 @@ class PaperTradingEngine:
             )
 
             for bet in ltd_bets:
-                # Get event name from database
+                # Get event name and start time from database
                 event_name = "Unknown"
+                market_start_time = None
                 try:
                     async with db.session() as session:
                         market_repo = MarketRepository(session)
                         market = await market_repo.get(bet.market_id)
                         if market:
                             event_name = market.event_name
+                            market_start_time = market.start_time
                 except Exception:
                     pass
 
@@ -363,6 +365,7 @@ class PaperTradingEngine:
                     entry_odds=bet.matched_odds,
                     entry_stake=bet.stake,
                     event_name=event_name,
+                    market_start_time=market_start_time,
                 )
 
         except Exception as e:
@@ -1203,6 +1206,7 @@ class PaperTradingEngine:
                 )
 
                 # Try to save to database (non-fatal if fails)
+                market_start_time = None  # Track for LTD streaming monitor
                 try:
                     async with db.session() as session:
                         # First ensure market exists in DB (to satisfy foreign key)
@@ -1222,6 +1226,9 @@ class PaperTradingEngine:
                                 status=MarketStatus.OPEN,
                             )
                             await market_repo.save(minimal_market)
+                            market_start_time = minimal_market.start_time
+                        else:
+                            market_start_time = existing_market.start_time
 
                         # Now save the bet
                         bet_repo = BetRepository(session)
@@ -1253,6 +1260,7 @@ class PaperTradingEngine:
                         entry_odds=bet.matched_odds,
                         entry_stake=bet.stake,
                         event_name=signal.event_name or "Unknown",
+                        market_start_time=market_start_time,
                     )
                     logger.info(
                         "Added LTD position to streaming monitor",

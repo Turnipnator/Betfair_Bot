@@ -44,6 +44,9 @@ class LTDStreamPosition:
     hedge_requested: bool = False
     hedging_in_progress: bool = False
 
+    # Market timing
+    market_start_time: Optional[datetime] = None  # When match kicked off
+
     # Timestamps
     created_at: datetime = field(default_factory=datetime.utcnow)
     goal_detected_at: Optional[datetime] = None
@@ -127,6 +130,7 @@ class LTDStreamMonitor:
         entry_odds: float,
         entry_stake: float,
         event_name: str,
+        market_start_time: Optional[datetime] = None,
     ) -> bool:
         """
         Add an LTD position to monitor.
@@ -137,6 +141,7 @@ class LTDStreamMonitor:
             entry_odds: Entry lay odds
             entry_stake: Entry stake
             event_name: Match name for logging
+            market_start_time: When the match started (for 60-min hedge delay)
 
         Returns:
             True if position added and subscribed
@@ -159,6 +164,7 @@ class LTDStreamMonitor:
             entry_stake=entry_stake,
             entry_liability=entry_liability,
             event_name=event_name,
+            market_start_time=market_start_time,
         )
 
         self._positions[market_id] = position
@@ -323,10 +329,36 @@ class LTDStreamMonitor:
         """
         Handle goal detection - trigger hedge.
 
+        Only hedges after 60 minutes elapsed to allow for potential
+        second goal which would give bigger profit.
+
         Args:
             position: The LTD position
             current_odds: Current draw back odds
         """
+        # Check if 60 minutes have elapsed before hedging
+        minutes_elapsed = 0
+        if position.market_start_time:
+            from datetime import timezone
+            now = datetime.now(timezone.utc)
+            # Handle naive datetime
+            start = position.market_start_time
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=timezone.utc)
+            elapsed = now - start
+            minutes_elapsed = elapsed.total_seconds() / 60
+
+        if minutes_elapsed < 60:
+            logger.info(
+                "GOAL DETECTED - Waiting for 60 mins before hedge",
+                match=position.event_name,
+                market_id=position.market_id,
+                minutes_elapsed=round(minutes_elapsed),
+                current_odds=current_odds,
+                entry_odds=position.entry_odds,
+            )
+            return  # Don't hedge yet
+
         # Use lock to prevent duplicate hedges
         async with self._hedge_lock:
             # Double-check state inside lock
@@ -340,9 +372,10 @@ class LTDStreamMonitor:
             position.goal_detected_at = datetime.utcnow()
 
             logger.info(
-                "GOAL DETECTED - Triggering LTD hedge",
+                "GOAL DETECTED (60+ mins) - Triggering LTD hedge",
                 match=position.event_name,
                 market_id=position.market_id,
+                minutes_elapsed=round(minutes_elapsed),
                 entry_odds=position.entry_odds,
                 current_odds=current_odds,
                 odds_spike=f"{(current_odds / position.entry_odds - 1) * 100:.1f}%",

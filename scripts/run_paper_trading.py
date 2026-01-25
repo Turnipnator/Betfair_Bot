@@ -91,6 +91,10 @@ class PaperTradingEngine:
         # Get bankroll - from Betfair in LIVE mode, calculated in PAPER mode
         is_paper = settings.is_paper_mode()
 
+        # In LIVE mode, login to Betfair first to get real balance
+        if not is_paper and settings.betfair.is_configured():
+            await betfair_client.login()
+
         if not is_paper and betfair_client.is_logged_in:
             # LIVE MODE: Get actual balance from Betfair (single source of truth)
             try:
@@ -187,13 +191,14 @@ class PaperTradingEngine:
             names=[s.name for s in self._strategies],
         )
 
-        # Initialize Betfair client
+        # Initialize Betfair client (login may have happened earlier for LIVE mode bankroll)
         if settings.betfair.is_configured():
-            success = await betfair_client.login()
-            if not success:
-                logger.warning("Failed to login to Betfair - running without live market data")
-                # Continue without Betfair - useful for testing infrastructure
-            else:
+            if not betfair_client.is_logged_in:
+                success = await betfair_client.login()
+                if not success:
+                    logger.warning("Failed to login to Betfair - running without live market data")
+
+            if betfair_client.is_logged_in:
                 # Initialize streaming components if enabled
                 if settings.streaming.enabled and betfair_client.api_client:
                     self._stream_manager = StreamManager(

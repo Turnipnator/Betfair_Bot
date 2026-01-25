@@ -126,7 +126,8 @@ class PaperTradingEngine:
         # Initialize simulator with correct bankroll
         self._simulator = PaperTradingSimulator(current)
 
-            # Load open bets from database (from previous runs)
+        # Load open bets from database (from previous runs)
+        async with db.session() as session:
             bet_repo = BetRepository(session)
             open_bet_records = await bet_repo.get_open(is_paper=is_paper)
             if open_bet_records:

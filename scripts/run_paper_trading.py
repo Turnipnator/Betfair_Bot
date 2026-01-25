@@ -241,6 +241,15 @@ class PaperTradingEngine:
         Called when a goal is detected and we need to place a hedge bet
         to lock in profit on an open LTD position.
         """
+        # Check if hedge already exists for this market (prevents duplicates)
+        if await self._hedge_exists_for_market(signal.market_id):
+            logger.warning(
+                "Hedge already exists - skipping duplicate",
+                market_id=signal.market_id,
+                match=signal.event_name,
+            )
+            return
+
         logger.info(
             "Processing LTD hedge signal from streaming",
             market_id=signal.market_id,
@@ -248,6 +257,13 @@ class PaperTradingEngine:
             hedge_odds=signal.odds,
             hedge_stake=signal.stake,
         )
+
+        # Mark the LTD strategy position as hedged BEFORE placing
+        # This prevents polling from creating duplicate signals
+        for strategy in self._strategies:
+            if strategy.name == "lay_the_draw":
+                strategy.mark_hedged(signal.market_id, signal.odds)
+                break
 
         # Process the hedge bet through normal signal flow
         await self.process_signal(signal)
@@ -272,6 +288,24 @@ class PaperTradingEngine:
                 placed_at=datetime.utcnow(),
             )
         )
+
+    async def _hedge_exists_for_market(self, market_id: str) -> bool:
+        """Check if an LTD hedge bet already exists for this market."""
+        try:
+            async with db.session() as session:
+                from sqlalchemy import select, func
+                from src.database.models import BetRecord
+                # Check for any ltd_hedge bets on this market
+                result = await session.execute(
+                    select(func.count(BetRecord.id))
+                    .where(BetRecord.market_id == market_id)
+                    .where(BetRecord.strategy == "ltd_hedge")
+                )
+                count = result.scalar() or 0
+                return count > 0
+        except Exception as e:
+            logger.warning("Error checking for existing hedge", error=str(e))
+            return False
 
     async def _subscribe_open_ltd_positions(self) -> None:
         """Subscribe to streaming for any open LTD positions from previous runs."""
@@ -572,6 +606,15 @@ class PaperTradingEngine:
                 if market.status == MarketStatus.CLOSED:
                     await self._settle_bet_from_market(bet, market)
                     continue
+
+                # For LTD positions, skip if hedge already exists (prevents duplicates)
+                if bet.strategy == "lay_the_draw":
+                    if await self._hedge_exists_for_market(bet.market_id):
+                        logger.debug(
+                            "Skipping LTD position management - hedge already exists",
+                            market_id=bet.market_id,
+                        )
+                        continue
 
                 # Find the strategy that placed this bet for position management
                 for strategy in self._strategies:

@@ -436,6 +436,35 @@ class LayTheDrawStrategy(BaseStrategy):
         position.state = LTDState.TRADED_OUT if pnl > 0 else LTDState.LOSS_CUT
         position.updated_at = datetime.utcnow()
 
+    def mark_hedged(self, market_id: str, exit_odds: float = 0.0) -> None:
+        """
+        Mark a position as hedged (called when streaming places a hedge).
+
+        This prevents polling from placing duplicate hedges.
+        """
+        if market_id not in self._positions:
+            # Create a minimal position record if it doesn't exist
+            self._positions[market_id] = LTDPosition(
+                market_id=market_id,
+                state=LTDState.TRADED_OUT,
+            )
+            logger.info(
+                "Created hedged position record",
+                market_id=market_id,
+            )
+            return
+
+        position = self._positions[market_id]
+        position.state = LTDState.TRADED_OUT
+        position.exit_odds = exit_odds
+        position.updated_at = datetime.utcnow()
+
+        logger.info(
+            "Marked LTD position as hedged",
+            market_id=market_id,
+            exit_odds=exit_odds,
+        )
+
     def get_position(self, market_id: str) -> Optional[LTDPosition]:
         """Get position for a market."""
         return self._positions.get(market_id)

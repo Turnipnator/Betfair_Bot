@@ -348,12 +348,15 @@ class LTDStreamMonitor:
             elapsed = now - start
             minutes_elapsed = elapsed.total_seconds() / 60
 
-        if minutes_elapsed < 60:
+        # 75 mins wall clock = ~60 mins match time (accounts for 15 min half time break)
+        min_elapsed_for_hedge = 75
+        if minutes_elapsed < min_elapsed_for_hedge:
             logger.info(
-                "GOAL DETECTED - Waiting for 60 mins before hedge",
+                "GOAL DETECTED - Waiting for 60 mins match time before hedge",
                 match=position.event_name,
                 market_id=position.market_id,
-                minutes_elapsed=round(minutes_elapsed),
+                wall_clock_mins=round(minutes_elapsed),
+                target_mins=min_elapsed_for_hedge,
                 current_odds=current_odds,
                 entry_odds=position.entry_odds,
             )

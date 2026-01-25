@@ -368,6 +368,32 @@ class LayTheDrawStrategy(BaseStrategy):
                 )
                 return None
 
+            # "Let winners run" - Don't hedge in late game (85+ match mins = ~100 wall clock)
+            # At this point, just let the LAY win outright
+            max_hedge_mins = 100
+            if minutes_elapsed > max_hedge_mins:
+                logger.info(
+                    "LTD: Late game - letting LAY win, no hedge needed",
+                    match=market.event_name,
+                    wall_clock_mins=round(minutes_elapsed),
+                    current_odds=current_draw_odds,
+                    entry_odds=position.entry_odds,
+                )
+                return None
+
+            # "Let winners run" - Don't hedge when draw is essentially dead (odds > 10.0)
+            # This catches dominant scorelines like 3-0 where comeback is unlikely
+            max_hedge_odds = 10.0
+            if current_draw_odds > max_hedge_odds:
+                logger.info(
+                    "LTD: Draw essentially dead (odds > 10) - letting LAY win, no hedge needed",
+                    match=market.event_name,
+                    wall_clock_mins=round(minutes_elapsed),
+                    current_odds=current_draw_odds,
+                    entry_odds=position.entry_odds,
+                )
+                return None
+
             position.state = LTDState.GOAL_SCORED
             position.updated_at = datetime.utcnow()
 

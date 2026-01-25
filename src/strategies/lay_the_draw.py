@@ -341,7 +341,7 @@ class LayTheDrawStrategy(BaseStrategy):
         goal_likely_scored = current_draw_odds >= position.entry_odds * 1.2
 
         if goal_likely_scored and position.state == LTDState.POSITION_OPEN:
-            # Check if 60 minutes have elapsed before hedging
+            # Check if we've reached half-time before hedging
             # This allows for potential second goal which would give bigger profit
             minutes_elapsed = 0
             if market.start_time:
@@ -354,14 +354,15 @@ class LayTheDrawStrategy(BaseStrategy):
                 elapsed = now - start
                 minutes_elapsed = elapsed.total_seconds() / 60
 
-            # 75 mins wall clock = ~60 mins match time (accounts for 15 min half time break)
-            min_elapsed_for_hedge = 75
-            if minutes_elapsed < min_elapsed_for_hedge:
+            # Wait until half-time (50 mins from kick-off = 45 min first half + 5 mins into break)
+            # First-half goals wait until half-time, second-half goals hedge immediately
+            half_time_mins = 50
+            if minutes_elapsed < half_time_mins:
                 logger.info(
-                    "LTD: Goal detected but waiting for 60 mins match time before hedge",
+                    "LTD: Goal detected but waiting for half-time before hedge",
                     match=market.event_name,
                     wall_clock_mins=round(minutes_elapsed),
-                    target_mins=min_elapsed_for_hedge,
+                    half_time_at=half_time_mins,
                     current_odds=current_draw_odds,
                     entry_odds=position.entry_odds,
                 )

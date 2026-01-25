@@ -25,6 +25,10 @@ GOAL_ODDS_SPIKE_THRESHOLD = 1.2
 # Minimum odds spike to consider (avoid false positives from small fluctuations)
 MIN_ODDS_CHANGE = 0.3
 
+# Minimum draw odds to hedge - below this, locked profit is too small
+# At 4.5+, we lock in ~£1.50 profit with reasonable hedge stake
+MIN_HEDGE_ODDS = 4.5
+
 
 @dataclass
 class LTDStreamPosition:
@@ -361,6 +365,19 @@ class LTDStreamMonitor:
                 entry_odds=position.entry_odds,
             )
             return  # Let polling handle it
+
+        # Check minimum odds threshold - below this, locked profit is too small
+        # Let the position ride and hope for no draw (or another goal to push odds higher)
+        if current_odds < MIN_HEDGE_ODDS:
+            logger.info(
+                "GOAL DETECTED - Odds below hedge threshold, letting position ride",
+                match=position.event_name,
+                market_id=position.market_id,
+                current_odds=current_odds,
+                min_hedge_odds=MIN_HEDGE_ODDS,
+                entry_odds=position.entry_odds,
+            )
+            return  # Don't hedge, odds too low
 
         # Wait until half-time (50 mins from kick-off = 45 min first half + 5 mins into break)
         # First-half goals wait until half-time, second-half goals hedge immediately

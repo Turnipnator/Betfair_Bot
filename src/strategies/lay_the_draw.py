@@ -26,6 +26,10 @@ logger = get_logger(__name__)
 # League tier settings - only bet on top 2 divisions
 MAX_LEAGUE_TIER = 2
 
+# Minimum draw odds to hedge - below this, locked profit is too small
+# At 4.5+, we lock in ~£1.50 profit with reasonable hedge stake
+MIN_HEDGE_ODDS = 4.5
+
 
 class LTDState(str, Enum):
     """Lay the Draw position states."""
@@ -342,6 +346,18 @@ class LayTheDrawStrategy(BaseStrategy):
         goal_likely_scored = current_draw_odds >= position.entry_odds * 1.2
 
         if goal_likely_scored and position.state == LTDState.POSITION_OPEN:
+            # Check minimum odds threshold - below this, locked profit is too small
+            # Let the position ride and hope for no draw (or another goal to push odds higher)
+            if current_draw_odds < MIN_HEDGE_ODDS:
+                logger.info(
+                    "LTD: Goal detected but odds below hedge threshold - letting position ride",
+                    match=market.event_name,
+                    current_odds=current_draw_odds,
+                    min_hedge_odds=MIN_HEDGE_ODDS,
+                    entry_odds=position.entry_odds,
+                )
+                return None
+
             # Check if we've reached half-time before hedging
             # This allows for potential second goal which would give bigger profit
             minutes_elapsed = 0

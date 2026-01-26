@@ -15,6 +15,7 @@ from config.logging_config import get_logger
 from src.models import BetSignal, BetType, Sport
 from src.streaming.stream_manager import StreamManager, MarketUpdate
 from src.utils import calculate_hedge_stake, round_to_tick
+from src.betfair.client import betfair_client
 
 logger = get_logger(__name__)
 
@@ -40,6 +41,9 @@ class LTDStreamPosition:
     entry_stake: float
     entry_liability: float
     event_name: str
+
+    # Event ID for in-play data
+    event_id: Optional[int] = None
 
     # State tracking
     is_in_play: bool = False
@@ -135,6 +139,7 @@ class LTDStreamMonitor:
         entry_stake: float,
         event_name: str,
         market_start_time: Optional[datetime] = None,
+        event_id: Optional[int] = None,
     ) -> bool:
         """
         Add an LTD position to monitor.
@@ -146,6 +151,7 @@ class LTDStreamMonitor:
             entry_stake: Entry stake
             event_name: Match name for logging
             market_start_time: When the match started (for 60-min hedge delay)
+            event_id: Betfair event ID for real-time match data
 
         Returns:
             True if position added and subscribed
@@ -168,6 +174,7 @@ class LTDStreamMonitor:
             entry_stake=entry_stake,
             entry_liability=entry_liability,
             event_name=event_name,
+            event_id=event_id,
             market_start_time=market_start_time,
         )
 
@@ -333,90 +340,115 @@ class LTDStreamMonitor:
         """
         Handle goal detection - trigger hedge.
 
-        Only hedges after 60 minutes elapsed to allow for potential
-        second goal which would give bigger profit.
+        Uses real match time from Betfair in-play service for accurate timing.
 
         Args:
             position: The LTD position
             current_odds: Current draw back odds
         """
-        # Check if we've reached half-time before hedging
-        minutes_elapsed = 0
-        if position.market_start_time:
+        # Get real match time from Betfair in-play service
+        match_time = 0
+        score_diff = 0
+        home_score = 0
+        away_score = 0
+
+        if position.event_id:
+            try:
+                match_state = await betfair_client.get_match_state(position.event_id)
+                if match_state:
+                    match_time = match_state.match_time
+                    score_diff = match_state.score_diff
+                    home_score = match_state.home_score
+                    away_score = match_state.away_score
+            except Exception as e:
+                logger.debug("Could not fetch match state", error=str(e))
+
+        # Fallback to wall clock if no match state available
+        if match_time == 0 and position.market_start_time:
             from datetime import timezone
             now = datetime.now(timezone.utc)
-            # Handle naive datetime
             start = position.market_start_time
             if start.tzinfo is None:
                 start = start.replace(tzinfo=timezone.utc)
             elapsed = now - start
-            minutes_elapsed = elapsed.total_seconds() / 60
+            wall_clock_mins = elapsed.total_seconds() / 60
 
-        # Sanity check: if elapsed time is unreasonable (>120 mins), the start_time
-        # is probably wrong (e.g., set to bet placement time instead of kick-off).
-        # In this case, let polling handle it with more accurate time tracking.
-        if minutes_elapsed > 120:
-            logger.warning(
-                "GOAL DETECTED - Elapsed time unreasonable, deferring to polling",
-                match=position.event_name,
-                market_id=position.market_id,
-                minutes_elapsed=round(minutes_elapsed),
-                current_odds=current_odds,
-                entry_odds=position.entry_odds,
-            )
-            return  # Let polling handle it
+            # Sanity check for wall clock
+            if wall_clock_mins > 120:
+                logger.warning(
+                    "GOAL DETECTED - Elapsed time unreasonable, deferring to polling",
+                    match=position.event_name,
+                    market_id=position.market_id,
+                    wall_clock_mins=round(wall_clock_mins),
+                    current_odds=current_odds,
+                    entry_odds=position.entry_odds,
+                )
+                return  # Let polling handle it
+
+            # Wall clock to match time approximation (subtract ~15 mins for half-time)
+            match_time = max(0, wall_clock_mins - 15) if wall_clock_mins > 50 else wall_clock_mins
 
         # Check minimum odds threshold - below this, locked profit is too small
-        # Let the position ride and hope for no draw (or another goal to push odds higher)
         if current_odds < MIN_HEDGE_ODDS:
             logger.info(
                 "GOAL DETECTED - Odds below hedge threshold, letting position ride",
                 match=position.event_name,
                 market_id=position.market_id,
+                match_time=round(match_time),
                 current_odds=current_odds,
                 min_hedge_odds=MIN_HEDGE_ODDS,
                 entry_odds=position.entry_odds,
             )
             return  # Don't hedge, odds too low
 
-        # Wait until half-time (50 mins from kick-off = 45 min first half + 5 mins into break)
-        # First-half goals wait until half-time, second-half goals hedge immediately
-        half_time_mins = 50
-        if minutes_elapsed < half_time_mins:
+        # Wait until half-time (45 mins match time) before hedging first-half goals
+        if match_time < 45:
             logger.info(
                 "GOAL DETECTED - Waiting for half-time before hedge",
                 match=position.event_name,
                 market_id=position.market_id,
-                wall_clock_mins=round(minutes_elapsed),
-                half_time_at=half_time_mins,
+                match_time=round(match_time),
+                score=f"{home_score}-{away_score}" if score_diff > 0 else "unknown",
                 current_odds=current_odds,
                 entry_odds=position.entry_odds,
             )
             return  # Don't hedge yet
 
-        # "Let winners run" - Don't hedge at/after full time (90 match mins = ~105 wall clock)
-        # At this point, just let the LAY win outright
-        max_hedge_mins = 105
-        if minutes_elapsed > max_hedge_mins:
+        # "Let winners run" - Don't hedge at/after 88 mins (injury time)
+        if match_time >= 88:
             logger.info(
                 "GOAL DETECTED - Late game, letting LAY win (no hedge)",
                 match=position.event_name,
                 market_id=position.market_id,
-                wall_clock_mins=round(minutes_elapsed),
+                match_time=round(match_time),
+                score=f"{home_score}-{away_score}",
+                current_odds=current_odds,
+                entry_odds=position.entry_odds,
+            )
+            return  # Let LAY win
+
+        # "Let winners run" - Don't hedge when score difference is 2+ goals
+        if score_diff >= 2:
+            logger.info(
+                "GOAL DETECTED - Dominant scoreline, letting LAY win (no hedge)",
+                match=position.event_name,
+                market_id=position.market_id,
+                match_time=round(match_time),
+                score=f"{home_score}-{away_score}",
+                score_diff=score_diff,
                 current_odds=current_odds,
                 entry_odds=position.entry_odds,
             )
             return  # Let LAY win
 
         # "Let winners run" - Don't hedge when draw is essentially dead (odds > 10.0)
-        # This catches dominant scorelines like 3-0 where comeback is unlikely
         max_hedge_odds = 10.0
         if current_odds > max_hedge_odds:
             logger.info(
                 "GOAL DETECTED - Draw dead (odds > 10), letting LAY win (no hedge)",
                 match=position.event_name,
                 market_id=position.market_id,
-                wall_clock_mins=round(minutes_elapsed),
+                match_time=round(match_time),
                 current_odds=current_odds,
                 entry_odds=position.entry_odds,
             )
@@ -435,10 +467,11 @@ class LTDStreamMonitor:
             position.goal_detected_at = datetime.utcnow()
 
             logger.info(
-                "GOAL DETECTED (60+ mins) - Triggering LTD hedge",
+                "GOAL DETECTED - Triggering LTD hedge",
                 match=position.event_name,
                 market_id=position.market_id,
-                minutes_elapsed=round(minutes_elapsed),
+                match_time=round(match_time),
+                score=f"{home_score}-{away_score}" if score_diff > 0 else "unknown",
                 entry_odds=position.entry_odds,
                 current_odds=current_odds,
                 odds_spike=f"{(current_odds / position.entry_odds - 1) * 100:.1f}%",

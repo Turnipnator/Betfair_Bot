@@ -346,9 +346,10 @@ class PaperTradingEngine:
             )
 
             for bet in ltd_bets:
-                # Get event name and start time from database
+                # Get event name, start time and event_id from database
                 event_name = "Unknown"
                 market_start_time = None
+                event_id = None
                 try:
                     async with db.session() as session:
                         market_repo = MarketRepository(session)
@@ -356,6 +357,7 @@ class PaperTradingEngine:
                         if market:
                             event_name = market.event_name
                             market_start_time = market.start_time
+                            event_id = market.event_id
                 except Exception:
                     pass
 
@@ -366,6 +368,7 @@ class PaperTradingEngine:
                     entry_stake=bet.stake,
                     event_name=event_name,
                     market_start_time=market_start_time,
+                    event_id=event_id,
                 )
 
         except Exception as e:
@@ -1207,6 +1210,7 @@ class PaperTradingEngine:
 
                 # Try to save to database (non-fatal if fails)
                 market_start_time = None  # Track for LTD streaming monitor
+                event_id = None  # Track for real match time
                 try:
                     async with db.session() as session:
                         # First ensure market exists in DB (to satisfy foreign key)
@@ -1225,12 +1229,15 @@ class PaperTradingEngine:
                                 sport=signal.sport,
                                 market_type="WIN" if signal.sport and signal.sport.value == "horse_racing" else "MATCH_ODDS",
                                 start_time=actual_start_time,
+                                event_id=signal.event_id,
                                 status=MarketStatus.OPEN,
                             )
                             await market_repo.save(minimal_market)
                             market_start_time = minimal_market.start_time
+                            event_id = minimal_market.event_id
                         else:
                             market_start_time = existing_market.start_time
+                            event_id = existing_market.event_id
 
                         # Now save the bet
                         bet_repo = BetRepository(session)
@@ -1263,6 +1270,7 @@ class PaperTradingEngine:
                         entry_stake=bet.stake,
                         event_name=signal.event_name or "Unknown",
                         market_start_time=market_start_time,
+                        event_id=event_id,
                     )
                     logger.info(
                         "Added LTD position to streaming monitor",

@@ -93,6 +93,7 @@ class Market:
     venue: Optional[str] = None
     country_code: Optional[str] = None
     competition: Optional[str] = None
+    event_id: Optional[int] = None  # Betfair event ID for in-play data
 
     # Market state
     status: MarketStatus = MarketStatus.OPEN

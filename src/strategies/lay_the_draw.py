@@ -20,6 +20,7 @@ from src.models import Bet, BetSignal, BetType, Market, Runner, Sport
 from src.strategies.base import BaseStrategy
 from src.utils import calculate_hedge_stake, round_to_tick
 from src.data.football_data import LEAGUE_TIERS, football_data_service
+from src.betfair.client import betfair_client
 
 logger = get_logger(__name__)
 
@@ -50,6 +51,9 @@ class LTDPosition:
     state: LTDState
     entry_bet: Optional[Bet] = None
     exit_bet: Optional[Bet] = None
+
+    # Event ID for in-play data
+    event_id: Optional[int] = None
 
     # Match state
     home_goals: int = 0
@@ -281,6 +285,7 @@ class LayTheDrawStrategy(BaseStrategy):
             competition=market.competition,
             reason=f"LTD entry: Draw @ {draw_odds:.2f}",
             market_start_time=market.start_time,
+            event_id=market.event_id,
         )
 
         self.log_signal(signal)
@@ -311,6 +316,7 @@ class LayTheDrawStrategy(BaseStrategy):
                 market_id=market.market_id,
                 state=LTDState.POSITION_OPEN,
                 entry_bet=open_bet,
+                event_id=market.event_id,
                 entry_odds=open_bet.matched_odds,
                 entry_stake=open_bet.stake,
                 entry_liability=open_bet.potential_loss,
@@ -358,54 +364,85 @@ class LayTheDrawStrategy(BaseStrategy):
                 )
                 return None
 
-            # Check if we've reached half-time before hedging
-            # This allows for potential second goal which would give bigger profit
-            minutes_elapsed = 0
-            if market.start_time:
+            # Get real match time from Betfair in-play service
+            import asyncio
+            match_time = 0
+            score_diff = 0
+            match_state = None
+
+            if position.event_id:
+                try:
+                    loop = asyncio.get_event_loop()
+                    match_state = loop.run_until_complete(
+                        betfair_client.get_match_state(position.event_id)
+                    )
+                    if match_state:
+                        match_time = match_state.match_time
+                        score_diff = match_state.score_diff
+                        # Update position with real score
+                        position.home_goals = match_state.home_score
+                        position.away_goals = match_state.away_score
+                        position.minutes_elapsed = match_time
+                except Exception as e:
+                    logger.debug("Could not fetch match state, using wall clock", error=str(e))
+
+            # Fallback to wall clock if no match state available
+            if match_time == 0 and market.start_time:
                 from datetime import timezone
                 now = datetime.now(timezone.utc)
-                # Handle naive datetime from market
                 start = market.start_time
                 if start.tzinfo is None:
                     start = start.replace(tzinfo=timezone.utc)
                 elapsed = now - start
-                minutes_elapsed = elapsed.total_seconds() / 60
+                # Wall clock to match time approximation (subtract ~15 mins for half-time)
+                wall_clock_mins = elapsed.total_seconds() / 60
+                match_time = max(0, wall_clock_mins - 15) if wall_clock_mins > 50 else wall_clock_mins
 
-            # Wait until half-time (50 mins from kick-off = 45 min first half + 5 mins into break)
-            # First-half goals wait until half-time, second-half goals hedge immediately
-            half_time_mins = 50
-            if minutes_elapsed < half_time_mins:
+            # Wait until half-time (45 mins match time) before hedging first-half goals
+            if match_time < 45:
                 logger.info(
                     "LTD: Goal detected but waiting for half-time before hedge",
                     match=market.event_name,
-                    wall_clock_mins=round(minutes_elapsed),
-                    half_time_at=half_time_mins,
+                    match_time=round(match_time),
+                    score=f"{position.home_goals}-{position.away_goals}" if match_state else "unknown",
                     current_odds=current_draw_odds,
                     entry_odds=position.entry_odds,
                 )
                 return None
 
-            # "Let winners run" - Don't hedge at/after full time (90 match mins = ~105 wall clock)
-            # At this point, just let the LAY win outright
-            max_hedge_mins = 105
-            if minutes_elapsed > max_hedge_mins:
+            # "Let winners run" - Don't hedge at/after 88 mins (injury time)
+            if match_time >= 88:
                 logger.info(
                     "LTD: Late game - letting LAY win, no hedge needed",
                     match=market.event_name,
-                    wall_clock_mins=round(minutes_elapsed),
+                    match_time=round(match_time),
+                    score=f"{position.home_goals}-{position.away_goals}" if match_state else "unknown",
+                    current_odds=current_draw_odds,
+                    entry_odds=position.entry_odds,
+                )
+                return None
+
+            # "Let winners run" - Don't hedge when score difference is 2+ goals
+            # (e.g., 2-0, 3-1, 4-0 - draw very unlikely)
+            if score_diff >= 2:
+                logger.info(
+                    "LTD: Dominant scoreline - letting LAY win, no hedge needed",
+                    match=market.event_name,
+                    match_time=round(match_time),
+                    score=f"{position.home_goals}-{position.away_goals}",
+                    score_diff=score_diff,
                     current_odds=current_draw_odds,
                     entry_odds=position.entry_odds,
                 )
                 return None
 
             # "Let winners run" - Don't hedge when draw is essentially dead (odds > 10.0)
-            # This catches dominant scorelines like 3-0 where comeback is unlikely
             max_hedge_odds = 10.0
             if current_draw_odds > max_hedge_odds:
                 logger.info(
                     "LTD: Draw essentially dead (odds > 10) - letting LAY win, no hedge needed",
                     match=market.event_name,
-                    wall_clock_mins=round(minutes_elapsed),
+                    match_time=round(match_time),
                     current_odds=current_draw_odds,
                     entry_odds=position.entry_odds,
                 )
@@ -463,6 +500,7 @@ class LayTheDrawStrategy(BaseStrategy):
             competition=market.competition,
             reason=f"LTD exit ({reason}): Back @ {exit_odds:.2f}",
             market_start_time=market.start_time,
+            event_id=market.event_id,
         )
 
         position.exit_odds = exit_odds

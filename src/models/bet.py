@@ -71,6 +71,7 @@ class BetSignal:
     # Timing
     signal_time: datetime = field(default_factory=datetime.utcnow)
     market_start_time: Optional[datetime] = None  # Actual kick-off time from Betfair
+    event_id: Optional[int] = None  # Betfair event ID for in-play data
 
     @property
     def potential_profit(self) -> float:

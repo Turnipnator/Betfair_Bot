@@ -17,6 +17,7 @@ from betfairlightweight.exceptions import APIError
 
 from config import settings
 from config.logging_config import get_logger
+from dataclasses import dataclass
 from src.models import (
     Market,
     MarketFilter,
@@ -25,6 +26,34 @@ from src.models import (
     Runner,
     Sport,
 )
+
+
+@dataclass
+class MatchState:
+    """Real-time match state from Betfair in-play service."""
+
+    event_id: int
+    match_time: int  # Actual match minutes elapsed
+    home_score: int
+    away_score: int
+    status: str  # "InProgress", "HalfTime", "SecondHalfKickOff", "Finished"
+
+    @property
+    def is_half_time(self) -> bool:
+        return self.status in ("HalfTime", "SecondHalfKickOff")
+
+    @property
+    def is_finished(self) -> bool:
+        return self.status == "Finished"
+
+    @property
+    def is_second_half(self) -> bool:
+        return self.match_time >= 45 or self.status == "SecondHalfKickOff"
+
+    @property
+    def score_diff(self) -> int:
+        """Absolute goal difference."""
+        return abs(self.home_score - self.away_score)
 
 logger = get_logger(__name__)
 
@@ -335,6 +364,7 @@ class BetfairClient:
                     )
 
             competition_name = cat.competition.name if cat.competition else None
+            event_id = int(cat.event.id) if cat.event and cat.event.id else None
             return Market(
                 market_id=cat.market_id,
                 market_name=cat.market_name,
@@ -345,6 +375,7 @@ class BetfairClient:
                 venue=cat.event.venue if cat.event else None,
                 country_code=cat.event.country_code if cat.event else None,
                 competition=competition_name,
+                event_id=event_id,
                 runners=runners,
             )
         except Exception as e:
@@ -501,6 +532,57 @@ class BetfairClient:
         except Exception as e:
             logger.error("Unexpected error fetching cleared orders", error=str(e))
             return []
+
+    async def get_match_state(self, event_id: int) -> Optional[MatchState]:
+        """
+        Get real-time match state from Betfair in-play service.
+
+        Returns actual match time, score, and status - much more accurate
+        than wall clock approximation.
+
+        Args:
+            event_id: Betfair event ID (from market.event.id)
+
+        Returns:
+            MatchState with real match data, or None if unavailable.
+        """
+        if not self.is_logged_in:
+            return None
+
+        try:
+            loop = asyncio.get_event_loop()
+            timeline = await loop.run_in_executor(
+                None,
+                lambda: self._client.in_play_service.get_event_timeline(
+                    event_id=event_id
+                ),
+            )
+
+            if not timeline:
+                return None
+
+            # Extract score
+            score = timeline.score
+            home_score = 0
+            away_score = 0
+            if score and hasattr(score, 'home') and hasattr(score, 'away'):
+                home_score = int(getattr(score.home, 'score', 0) or 0)
+                away_score = int(getattr(score.away, 'score', 0) or 0)
+
+            return MatchState(
+                event_id=event_id,
+                match_time=timeline.time_elapsed or 0,
+                home_score=home_score,
+                away_score=away_score,
+                status=timeline.in_play_match_status or "Unknown",
+            )
+
+        except APIError as e:
+            logger.debug("Error fetching match state", event_id=event_id, error=str(e))
+            return None
+        except Exception as e:
+            logger.debug("Unexpected error fetching match state", event_id=event_id, error=str(e))
+            return None
 
 
 # Global client instance

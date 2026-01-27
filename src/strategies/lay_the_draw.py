@@ -31,6 +31,11 @@ MAX_LEAGUE_TIER = 2
 # At 4.5+, we lock in ~£1.50 profit with reasonable hedge stake
 MIN_HEDGE_ODDS = 4.5
 
+# European competitions to include (bypasses domestic stats requirement)
+EUROPEAN_COMPETITIONS = [
+    "champions league", "uefa champions", "ucl",
+]
+
 
 class LTDState(str, Enum):
     """Lay the Draw position states."""
@@ -159,6 +164,7 @@ class LayTheDrawStrategy(BaseStrategy):
 
         # Filter: League tier check - only bet on tier 1 & 2 leagues
         # REQUIRE football-data.co.uk coverage - no data = no bet
+        # EXCEPTION: Champions League (high quality matches, good liquidity)
         if market.event_name and " v " in market.event_name:
             parts = market.event_name.split(" v ")
             if len(parts) == 2:
@@ -170,60 +176,71 @@ class LayTheDrawStrategy(BaseStrategy):
                         market=market.event_name,
                     )
                     return None
-                # Check league tier - REQUIRE coverage
-                match_stats = await football_data_service.get_match_stats(home_team, away_team)
-                if match_stats:
-                    home_stats, away_stats, league_stats = match_stats
-                    league_tier = LEAGUE_TIERS.get(league_stats.league_code, 99)
-                    if league_tier > MAX_LEAGUE_TIER:
-                        logger.debug(
-                            "LTD: Skipping - league tier too low",
-                            market=market.event_name,
-                            league=league_stats.league_code,
-                            tier=league_tier,
-                            max_tier=MAX_LEAGUE_TIER,
-                        )
-                        return None
 
-                    # Filter: Both teams must average enough goals to avoid 0-0 draws
-                    # This is the killer for LTD - no goal = no hedge opportunity
-                    # Use home scoring avg for home team, away scoring avg for away team
-                    home_goals_avg = home_stats.home_scored_avg if home_stats.home_played >= 3 else 0
-                    away_goals_avg = away_stats.away_scored_avg if away_stats.away_played >= 3 else 0
+                # Check if this is a Champions League match (bypass stats requirement)
+                competition_lower = (market.competition or "").lower()
+                is_champions_league = any(comp in competition_lower for comp in EUROPEAN_COMPETITIONS)
 
-                    if home_goals_avg < self.MIN_TEAM_GOALS_AVG:
-                        logger.debug(
-                            "LTD: Skipping - home team low scoring",
-                            market=market.event_name,
-                            home_goals_avg=f"{home_goals_avg:.2f}",
-                            min_required=self.MIN_TEAM_GOALS_AVG,
-                        )
-                        return None
-
-                    if away_goals_avg < self.MIN_TEAM_GOALS_AVG:
-                        logger.debug(
-                            "LTD: Skipping - away team low scoring",
-                            market=market.event_name,
-                            away_goals_avg=f"{away_goals_avg:.2f}",
-                            min_required=self.MIN_TEAM_GOALS_AVG,
-                        )
-                        return None
-
+                if is_champions_league:
+                    # Champions League - skip stats filtering, just check draw odds
                     logger.info(
-                        "LTD: Teams pass goals filter",
+                        "LTD: Champions League match - bypassing stats requirement",
                         market=market.event_name,
-                        home_goals_avg=f"{home_goals_avg:.2f}",
-                        away_goals_avg=f"{away_goals_avg:.2f}",
+                        competition=market.competition,
                     )
                 else:
-                    # NO DATA = NO BET - don't bet on leagues we can't verify
-                    logger.debug(
-                        "LTD: Skipping - no football-data.co.uk coverage",
-                        market=market.event_name,
-                        home=home_team,
-                        away=away_team,
-                    )
-                    return None
+                    # Domestic leagues - REQUIRE football-data.co.uk coverage
+                    match_stats = await football_data_service.get_match_stats(home_team, away_team)
+                    if match_stats:
+                        home_stats, away_stats, league_stats = match_stats
+                        league_tier = LEAGUE_TIERS.get(league_stats.league_code, 99)
+                        if league_tier > MAX_LEAGUE_TIER:
+                            logger.debug(
+                                "LTD: Skipping - league tier too low",
+                                market=market.event_name,
+                                league=league_stats.league_code,
+                                tier=league_tier,
+                                max_tier=MAX_LEAGUE_TIER,
+                            )
+                            return None
+
+                        # Filter: Both teams must average enough goals to avoid 0-0 draws
+                        home_goals_avg = home_stats.home_scored_avg if home_stats.home_played >= 3 else 0
+                        away_goals_avg = away_stats.away_scored_avg if away_stats.away_played >= 3 else 0
+
+                        if home_goals_avg < self.MIN_TEAM_GOALS_AVG:
+                            logger.debug(
+                                "LTD: Skipping - home team low scoring",
+                                market=market.event_name,
+                                home_goals_avg=f"{home_goals_avg:.2f}",
+                                min_required=self.MIN_TEAM_GOALS_AVG,
+                            )
+                            return None
+
+                        if away_goals_avg < self.MIN_TEAM_GOALS_AVG:
+                            logger.debug(
+                                "LTD: Skipping - away team low scoring",
+                                market=market.event_name,
+                                away_goals_avg=f"{away_goals_avg:.2f}",
+                                min_required=self.MIN_TEAM_GOALS_AVG,
+                            )
+                            return None
+
+                        logger.info(
+                            "LTD: Teams pass goals filter",
+                            market=market.event_name,
+                            home_goals_avg=f"{home_goals_avg:.2f}",
+                            away_goals_avg=f"{away_goals_avg:.2f}",
+                        )
+                    else:
+                        # NO DATA = NO BET - don't bet on leagues we can't verify
+                        logger.debug(
+                            "LTD: Skipping - no football-data.co.uk coverage",
+                            market=market.event_name,
+                            home=home_team,
+                            away=away_team,
+                        )
+                        return None
 
         # Find the draw selection
         draw_runner = self._find_draw_runner(market)

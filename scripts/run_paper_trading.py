@@ -526,32 +526,61 @@ class PaperTradingEngine:
             if date.today() != self._current_date:
                 await self.daily_reset()
 
-            # Build filter
-            # No country filter = all countries including UEFA competitions (CL, EL)
-            # Strategy-level filtering handles league tier requirements
-            market_filter = MarketFilter(
+            # Build filter for domestic leagues (with country filter)
+            domestic_filter = MarketFilter(
                 sports=[Sport.HORSE_RACING, Sport.FOOTBALL],
                 market_types=["WIN", "MATCH_ODDS"],
-                countries=[],  # Empty = all countries (including UEFA CL/EL)
+                countries=[
+                    "GB",  # England & Scotland
+                    "ES",  # Spain (La Liga, Segunda)
+                    "DE",  # Germany (Bundesliga, 2. Bundesliga)
+                    "IT",  # Italy (Serie A, Serie B)
+                    "FR",  # France (Ligue 1, Ligue 2)
+                    "PT",  # Portugal (Primeira Liga)
+                    "NL",  # Netherlands (Eredivisie)
+                    "DK",  # Denmark (Superligaen)
+                ],
                 from_hours=0.5,  # Starting in 30 mins
                 to_hours=12,  # Up to 12 hours ahead
-                max_results=200,  # Increased to handle more markets
+                max_results=100,
             )
 
-            # Fetch markets
-            if betfair_client.is_logged_in:
-                markets = await betfair_client.get_markets(market_filter)
+            # Second filter for UEFA competitions (no country filter, will filter by competition name)
+            uefa_filter = MarketFilter(
+                sports=[Sport.FOOTBALL],
+                market_types=["MATCH_ODDS"],
+                countries=[],  # No country filter for UEFA
+                from_hours=0.5,
+                to_hours=12,
+                max_results=50,
+            )
 
-                # Get prices for these markets
+            # Fetch markets from both sources
+            markets = []
+            if betfair_client.is_logged_in:
+                # Get domestic markets
+                domestic_markets = await betfair_client.get_markets(domestic_filter)
+                if domestic_markets:
+                    markets.extend(domestic_markets)
+
+                # Get UEFA markets and filter to only CL/EL
+                uefa_markets = await betfair_client.get_markets(uefa_filter)
+                if uefa_markets:
+                    uefa_keywords = ["champions league", "europa league", "conference league"]
+                    for m in uefa_markets:
+                        comp = (m.competition or "").lower()
+                        if any(kw in comp for kw in uefa_keywords):
+                            # Avoid duplicates (some matches might appear in both)
+                            if m.market_id not in [x.market_id for x in markets]:
+                                markets.append(m)
+
+                # Get prices for all markets
                 if markets:
                     market_ids = [m.market_id for m in markets]
                     markets_with_prices = await betfair_client.get_market_prices(
                         market_ids
                     )
                     markets = list(markets_with_prices.values())
-            else:
-                # No markets without Betfair connection
-                markets = []
 
             self._markets_scanned += len(markets)
 

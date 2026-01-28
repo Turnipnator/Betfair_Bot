@@ -669,6 +669,18 @@ class PaperTradingEngine:
                     if strategy.name == bet.strategy:
                         exit_signal = strategy.manage_position(market, bet)
                         if exit_signal:
+                            # For LTD hedges, mark position as hedged BEFORE placing
+                            # This prevents streaming from creating duplicate hedges
+                            if exit_signal.strategy == "ltd_hedge":
+                                strategy.mark_hedged(exit_signal.market_id, exit_signal.odds)
+                                # Also notify streaming monitor to prevent its duplicate
+                                if self._ltd_monitor:
+                                    self._ltd_monitor.mark_position_hedged(exit_signal.market_id)
+                                logger.info(
+                                    "Polling marked LTD position as hedged",
+                                    market_id=exit_signal.market_id,
+                                    hedge_odds=exit_signal.odds,
+                                )
                             await self.process_signal(exit_signal)
                         break
 

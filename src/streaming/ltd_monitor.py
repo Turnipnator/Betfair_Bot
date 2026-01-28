@@ -242,6 +242,23 @@ class LTDStreamMonitor:
         """Get position info for a market."""
         return self._positions.get(market_id)
 
+    def mark_position_hedged(self, market_id: str) -> None:
+        """
+        Mark a position as already hedged (called by polling when it hedges).
+
+        This prevents streaming from placing a duplicate hedge.
+        """
+        position = self._positions.get(market_id)
+        if position:
+            position.goal_detected = True
+            position.hedge_requested = True
+            position.hedging_in_progress = False
+            logger.info(
+                "Streaming position marked as hedged by polling",
+                market_id=market_id,
+                match=position.event_name,
+            )
+
     async def _on_market_update(self, update: MarketUpdate) -> None:
         """
         Handle market update from streaming.

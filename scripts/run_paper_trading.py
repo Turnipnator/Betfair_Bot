@@ -527,23 +527,15 @@ class PaperTradingEngine:
                 await self.daily_reset()
 
             # Build filter
-            # Include major European leagues for football + tennis
+            # No country filter = all countries including UEFA competitions (CL, EL)
+            # Strategy-level filtering handles league tier requirements
             market_filter = MarketFilter(
                 sports=[Sport.HORSE_RACING, Sport.FOOTBALL],
                 market_types=["WIN", "MATCH_ODDS"],
-                countries=[
-                    "GB",  # England & Scotland
-                    "ES",  # Spain (La Liga, Segunda)
-                    "DE",  # Germany (Bundesliga, 2. Bundesliga)
-                    "IT",  # Italy (Serie A, Serie B)
-                    "FR",  # France (Ligue 1, Ligue 2)
-                    "PT",  # Portugal (Primeira Liga)
-                    "NL",  # Netherlands (Eredivisie)
-                    "DK",  # Denmark (Superligaen)
-                ],
+                countries=[],  # Empty = all countries (including UEFA CL/EL)
                 from_hours=0.5,  # Starting in 30 mins
                 to_hours=12,  # Up to 12 hours ahead
-                max_results=100,
+                max_results=200,  # Increased to handle more markets
             )
 
             # Fetch markets

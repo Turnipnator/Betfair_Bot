@@ -225,16 +225,21 @@ class BetfairClient:
             to_time = datetime.utcnow() + timedelta(hours=filter.to_hours)
 
             # Create market filter
-            mf = market_filter(
-                event_type_ids=event_type_ids,
-                market_type_codes=filter.market_types,
-                market_countries=filter.countries,
-                in_play_only=filter.in_play_only,
-                market_start_time=time_range(
+            # Only apply country filter if countries list is not empty
+            # Empty list = all countries (needed for UEFA competitions)
+            filter_kwargs = {
+                "event_type_ids": event_type_ids,
+                "market_type_codes": filter.market_types,
+                "in_play_only": filter.in_play_only,
+                "market_start_time": time_range(
                     from_=from_time.isoformat(),
                     to=to_time.isoformat(),
                 ),
-            )
+            }
+            if filter.countries:
+                filter_kwargs["market_countries"] = filter.countries
+
+            mf = market_filter(**filter_kwargs)
 
             # Fetch market catalogue
             loop = asyncio.get_event_loop()

@@ -170,3 +170,5 @@ Generated Sunday 23:59. Must show:
 ## Reference Material
 
 See `REFERENCE.md` for detailed code examples, database schema, Docker configuration, Betfair authentication setup, and strategy implementation specifics.
+
+https://traderline.com/education/betfair-hedging-strategies-profits for strategies 

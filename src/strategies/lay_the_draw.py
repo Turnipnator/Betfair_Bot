@@ -34,6 +34,8 @@ MIN_HEDGE_ODDS = 4.5
 # European competitions to include (bypasses domestic stats requirement)
 EUROPEAN_COMPETITIONS = [
     "champions league", "uefa champions", "ucl",
+    "europa league", "uefa europa", "uel",
+    "conference league", "uefa conference", "uecl",
 ]
 
 

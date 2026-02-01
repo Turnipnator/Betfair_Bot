@@ -24,7 +24,7 @@ from config import settings
 from config.logging_config import setup_logging, get_logger
 from src.betfair import betfair_client
 from src.database import db, BankrollRepository, BetRepository, MarketRepository, PerformanceRepository
-from src.models import Bet, BetSignal, BetStatus, BetType, MarketFilter, Sport
+from src.models import Bet, BetResult, BetSignal, BetStatus, BetType, MarketFilter, Sport
 from src.paper_trading import PaperTradingSimulator
 from src.risk import risk_manager
 from src.strategies import (
@@ -418,6 +418,16 @@ class PaperTradingEngine:
             replace_existing=True,
         )
 
+        # Schedule balance sync with Betfair (LIVE mode only)
+        # Syncs every 10 minutes to ensure bankroll matches Betfair's records
+        if settings.is_live_mode():
+            self._scheduler.add_job(
+                self.sync_balance_with_betfair,
+                IntervalTrigger(minutes=10),
+                id="balance_sync",
+                replace_existing=True,
+            )
+
         # Schedule keep-alive for Betfair session
         if betfair_client.is_logged_in:
             self._scheduler.add_job(
@@ -463,6 +473,10 @@ class PaperTradingEngine:
 
         # Immediately settle any stale bets from previous runs
         await self.settle_stale_bets()
+
+        # Sync balance with Betfair immediately (LIVE mode)
+        if settings.is_live_mode():
+            await self.sync_balance_with_betfair()
 
         # Send startup notification
         if settings.telegram.is_configured():
@@ -964,8 +978,38 @@ class PaperTradingEngine:
                 profit = cleared.get("profit") or 0.0
                 commission = cleared.get("commission") or 0.0
 
+                # Handle voided bets (outcome is neither WON nor LOST)
                 if bet_outcome not in ("WON", "LOST"):
-                    # Voided or unknown - skip for now
+                    # Void the bet
+                    if self._simulator.void_bet(bet.id):
+                        # Remove from tracking
+                        if bet.strategy in self._markets_with_bets:
+                            self._markets_with_bets[bet.strategy].discard(bet.market_id)
+
+                        # Send notification
+                        await notifier.bet_settled(bet)
+
+                        # Update database
+                        try:
+                            async with db.session() as session:
+                                bet_repo = BetRepository(session)
+                                if bet.id:
+                                    await bet_repo.settle(
+                                        bet.id,
+                                        BetResult.VOID,
+                                        0.0,
+                                        0.0,
+                                    )
+                                    await session.commit()
+                        except Exception as db_error:
+                            logger.warning("Failed to update void in database", error=str(db_error)[:100])
+
+                        logger.info(
+                            "Bet voided via Betfair reconciliation",
+                            bet_ref=bet.bet_ref,
+                            outcome=bet_outcome,
+                        )
+                        reconciled_count += 1
                     continue
 
                 # Betfair's bet_outcome tells us if the BET won, not if the selection won.
@@ -1026,6 +1070,51 @@ class PaperTradingEngine:
 
         except Exception as e:
             logger.error("Error reconciling with Betfair", error=str(e))
+
+    async def sync_balance_with_betfair(self) -> None:
+        """
+        Sync bankroll with Betfair's actual account balance.
+
+        In LIVE mode, Betfair is the source of truth for the balance.
+        This corrects any drift between our tracking and reality.
+        """
+        if settings.is_paper_mode():
+            return
+
+        if not self._simulator:
+            return
+
+        if not betfair_client.is_logged_in:
+            return
+
+        try:
+            available, exposure, total = await betfair_client.get_account_funds()
+
+            old_bankroll = self._simulator.bankroll
+            difference = total - old_bankroll
+
+            if abs(difference) > 0.01:  # Only update if meaningful difference
+                # Update simulator's bankroll to match Betfair
+                self._simulator._bankroll = total
+                # Recalculate reserved based on exposure
+                self._simulator._reserved = abs(exposure) if exposure < 0 else 0
+
+                logger.info(
+                    "Synced bankroll with Betfair",
+                    old=f"£{old_bankroll:.2f}",
+                    new=f"£{total:.2f}",
+                    difference=f"£{difference:+.2f}",
+                    available=f"£{available:.2f}",
+                    exposure=f"£{exposure:.2f}",
+                )
+            else:
+                logger.debug(
+                    "Bankroll in sync with Betfair",
+                    balance=f"£{total:.2f}",
+                )
+
+        except Exception as e:
+            logger.warning("Failed to sync balance with Betfair", error=str(e))
 
     async def _place_live_bet(self, signal: BetSignal) -> tuple[bool, str, Optional[Bet]]:
         """

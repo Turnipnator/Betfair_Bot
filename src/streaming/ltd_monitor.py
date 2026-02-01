@@ -27,8 +27,8 @@ GOAL_ODDS_SPIKE_THRESHOLD = 1.2
 MIN_ODDS_CHANGE = 0.3
 
 # Minimum draw odds to hedge - below this, locked profit is too small
-# At 4.5+, we lock in ~£1.50 profit with reasonable hedge stake
-MIN_HEDGE_ODDS = 4.5
+# At 3.6+ (20% above entry), we lock in ~£1.70 profit on £10 stake
+MIN_HEDGE_ODDS = 3.6
 
 
 @dataclass
@@ -445,9 +445,10 @@ class LTDStreamMonitor:
             return  # Let LAY win
 
         # "Let winners run" - Don't hedge when score difference is 2+ goals
-        if score_diff >= 2:
+        # BUT only apply this late in the game (75+ mins) - early 2-0 can still come back
+        if score_diff >= 2 and match_time >= 75:
             logger.info(
-                "GOAL DETECTED - Dominant scoreline, letting LAY win (no hedge)",
+                "GOAL DETECTED - Dominant scoreline late game, letting LAY win (no hedge)",
                 match=position.event_name,
                 market_id=position.market_id,
                 match_time=round(match_time),

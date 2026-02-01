@@ -131,11 +131,28 @@ class Notifier:
         bet_type = "BACK" if bet.bet_type == BetType.BACK else "LAY"
         match_info = f"\n{bet.event_name}" if bet.event_name else ""
 
-        result_emoji = {
-            BetResult.WON: "WIN",
-            BetResult.LOST: "LOSS",
-            BetResult.VOID: "VOID",
-        }.get(bet.result, "???")
+        # Determine result - infer from P&L if result not explicitly set
+        if bet.result is not None:
+            result_emoji = {
+                BetResult.WON: "WIN",
+                BetResult.LOST: "LOSS",
+                BetResult.VOID: "VOID",
+            }.get(bet.result, "???")
+        elif bet.profit_loss > 0:
+            result_emoji = "WIN"
+        elif bet.profit_loss < 0:
+            result_emoji = "LOSS"
+        elif bet.profit_loss == 0 and bet.status.value == "SETTLED":
+            result_emoji = "VOID"
+        else:
+            result_emoji = "???"
+            logger.warning(
+                "Bet settled notification with unknown result",
+                bet_ref=bet.bet_ref,
+                result=bet.result,
+                profit_loss=bet.profit_loss,
+                status=bet.status.value if bet.status else None,
+            )
 
         text = (
             f"<b>BET SETTLED ({mode})</b>\n\n"

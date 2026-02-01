@@ -28,8 +28,8 @@ logger = get_logger(__name__)
 MAX_LEAGUE_TIER = 2
 
 # Minimum draw odds to hedge - below this, locked profit is too small
-# At 4.5+, we lock in ~£1.50 profit with reasonable hedge stake
-MIN_HEDGE_ODDS = 4.5
+# At 3.6+ (20% above entry), we lock in ~£1.70 profit on £10 stake
+MIN_HEDGE_ODDS = 3.6
 
 # European competitions to include (bypasses domestic stats requirement)
 EUROPEAN_COMPETITIONS = [
@@ -109,8 +109,8 @@ class LayTheDrawStrategy(BaseStrategy):
 
     def __init__(
         self,
-        min_draw_odds: float = 3.0,
-        max_draw_odds: float = 3.5,  # Widened from 3.25 to get more opportunities
+        min_draw_odds: float = 3.6,  # Raised from 3.0 - want clear favorite
+        max_draw_odds: float = 4.0,  # Raised from 3.5 - clear favorite = more goals
         min_market_volume: float = 0.0,  # Disabled for paper trading - no volume filter
         cut_loss_minute: int = 70,
         min_profit_percent: float = 0.5,
@@ -442,10 +442,10 @@ class LayTheDrawStrategy(BaseStrategy):
                 return None
 
             # "Let winners run" - Don't hedge when score difference is 2+ goals
-            # (e.g., 2-0, 3-1, 4-0 - draw very unlikely)
-            if score_diff >= 2:
+            # BUT only apply this late in the game (75+ mins) - early 2-0 can still come back
+            if score_diff >= 2 and match_time >= 75:
                 logger.info(
-                    "LTD: Dominant scoreline - letting LAY win, no hedge needed",
+                    "LTD: Dominant scoreline late game - letting LAY win, no hedge needed",
                     match=market.event_name,
                     match_time=round(match_time),
                     score=f"{position.home_goals}-{position.away_goals}",

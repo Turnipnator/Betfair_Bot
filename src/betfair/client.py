@@ -467,6 +467,59 @@ class BetfairClient:
             # If we can't check, assume there might be orders (safer)
             return False
 
+    async def has_matched_back_bet(self, market_id: str, selection_id: int) -> bool:
+        """
+        Check if we have a matched BACK bet on a specific selection.
+
+        Used to prevent duplicate LTD hedge bets - checks Betfair directly
+        rather than relying on database which may not have saved yet.
+
+        Args:
+            market_id: The market to check
+            selection_id: The selection (e.g., The Draw) to check
+
+        Returns:
+            True if a matched BACK bet exists on this selection
+        """
+        if not self.is_logged_in:
+            return False
+
+        try:
+            loop = asyncio.get_event_loop()
+            # Get ALL orders (including matched) for this market
+            orders = await loop.run_in_executor(
+                None,
+                lambda: self._client.betting.list_current_orders(
+                    market_ids=[market_id],
+                    order_projection="ALL",  # Include matched orders
+                ),
+            )
+
+            if orders and orders.orders:
+                for order in orders.orders:
+                    # Check for matched BACK bet on this selection
+                    if (
+                        order.selection_id == selection_id
+                        and order.side == "BACK"
+                        and order.size_matched and order.size_matched > 0
+                    ):
+                        logger.info(
+                            "Found existing matched BACK bet on Betfair",
+                            market_id=market_id,
+                            selection_id=selection_id,
+                            bet_id=order.bet_id,
+                            matched_size=order.size_matched,
+                            matched_price=order.average_price_matched,
+                        )
+                        return True
+
+            return False
+
+        except Exception as e:
+            logger.warning("Error checking matched back bets", error=str(e))
+            # If we can't check, be conservative and assume one exists
+            return True
+
     async def get_cleared_orders(
         self,
         from_hours: int = 24,

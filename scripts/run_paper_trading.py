@@ -265,11 +265,22 @@ class PaperTradingEngine:
         # Check if hedge already exists for this market (prevents duplicates)
         if await self._hedge_exists_for_market(signal.market_id):
             logger.warning(
-                "Hedge already exists - skipping duplicate",
+                "Hedge already exists (database) - skipping duplicate",
                 market_id=signal.market_id,
                 match=signal.event_name,
             )
             return
+
+        # CRITICAL: Check Betfair directly for matched BACK bets
+        # This catches hedges placed but not yet saved to database
+        if settings.is_live_mode() and betfair_client.is_logged_in:
+            if await betfair_client.has_matched_back_bet(signal.market_id, signal.selection_id):
+                logger.warning(
+                    "Hedge already exists (Betfair) - skipping duplicate",
+                    market_id=signal.market_id,
+                    match=signal.event_name,
+                )
+                return
 
         logger.info(
             "Processing LTD hedge signal from streaming",
@@ -340,9 +351,43 @@ class PaperTradingEngine:
             if not ltd_bets:
                 return
 
+            # CRITICAL: Check for existing hedges BEFORE subscribing
+            # This prevents duplicate hedges after restarts
+            hedged_markets = set()
+            for bet in ltd_bets:
+                # Check database first
+                has_db_hedge = await self._hedge_exists_for_market(bet.market_id)
+                # Also check Betfair directly for matched BACK bets
+                has_betfair_hedge = False
+                if settings.is_live_mode() and betfair_client.is_logged_in:
+                    has_betfair_hedge = await betfair_client.has_matched_back_bet(
+                        bet.market_id, bet.selection_id
+                    )
+
+                if has_db_hedge or has_betfair_hedge:
+                    hedged_markets.add(bet.market_id)
+                    # Mark in strategy memory
+                    for strategy in self._strategies:
+                        if strategy.name == "lay_the_draw":
+                            strategy.mark_hedged(bet.market_id)
+                            break
+                    logger.info(
+                        "Found existing hedge on startup - marked as hedged",
+                        market_id=bet.market_id,
+                        source="database" if has_db_hedge else "Betfair",
+                    )
+
+            # Filter out already-hedged positions
+            ltd_bets = [b for b in ltd_bets if b.market_id not in hedged_markets]
+
+            if not ltd_bets:
+                logger.info("All open LTD positions already hedged - nothing to monitor")
+                return
+
             logger.info(
                 "Subscribing to existing LTD positions",
                 count=len(ltd_bets),
+                already_hedged=len(hedged_markets),
             )
 
             for bet in ltd_bets:
@@ -673,10 +718,19 @@ class PaperTradingEngine:
                 if bet.strategy == "lay_the_draw":
                     if await self._hedge_exists_for_market(bet.market_id):
                         logger.debug(
-                            "Skipping LTD position management - hedge already exists",
+                            "Skipping LTD position management - hedge in database",
                             market_id=bet.market_id,
                         )
                         continue
+                    # CRITICAL: Also check Betfair directly for matched BACK bets
+                    if settings.is_live_mode() and betfair_client.is_logged_in:
+                        # Get draw selection_id from the bet
+                        if await betfair_client.has_matched_back_bet(bet.market_id, bet.selection_id):
+                            logger.info(
+                                "Skipping LTD position management - hedge found on Betfair",
+                                market_id=bet.market_id,
+                            )
+                            continue
 
                 # Find the strategy that placed this bet for position management
                 for strategy in self._strategies:
@@ -1231,8 +1285,31 @@ class PaperTradingEngine:
             return
 
         try:
-            # LTD hedge bets (BACK on a market where we already have a LAY) skip duplicate checks
+            # LTD hedge bets (BACK on a market where we already have a LAY) skip normal duplicate checks
+            # BUT we still need to check for duplicate HEDGE bets
             is_hedge = (signal.strategy == "ltd_hedge" and signal.bet_type == BetType.BACK)
+
+            if is_hedge:
+                # Final safety check: prevent duplicate hedge bets
+                # Check database first (fast)
+                if await self._hedge_exists_for_market(signal.market_id):
+                    logger.warning(
+                        "Duplicate hedge prevented (database check)",
+                        market_id=signal.market_id,
+                        match=signal.event_name,
+                    )
+                    return
+
+                # CRITICAL: Also check Betfair directly for matched BACK bets
+                # This catches hedges that were placed but not saved to DB
+                if settings.is_live_mode() and betfair_client.is_logged_in:
+                    if await betfair_client.has_matched_back_bet(signal.market_id, signal.selection_id):
+                        logger.warning(
+                            "Duplicate hedge prevented (Betfair check) - matched BACK already exists",
+                            market_id=signal.market_id,
+                            match=signal.event_name,
+                        )
+                        return
 
             if not is_hedge:
                 # Check if we already have a bet on this market for this strategy (in-memory)

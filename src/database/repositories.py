@@ -46,6 +46,9 @@ class MarketRepository:
             # Update existing
             record.status = market.status.value
             record.total_matched = market.total_matched
+            # Update event_id if we have it now
+            if hasattr(market, 'event_id') and market.event_id:
+                record.event_id = market.event_id
         else:
             # Create new
             record = MarketRecord(
@@ -59,6 +62,7 @@ class MarketRepository:
                 country_code=market.country_code,
                 status=market.status.value,
                 total_matched=market.total_matched,
+                event_id=getattr(market, 'event_id', None),
             )
             self.session.add(record)
 

@@ -402,7 +402,7 @@ class PaperTradingEngine:
                         if market:
                             event_name = market.event_name
                             market_start_time = market.start_time
-                            event_id = market.event_id
+                            event_id = getattr(market, 'event_id', None)
                 except Exception:
                     pass
 

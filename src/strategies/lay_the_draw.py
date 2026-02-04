@@ -417,17 +417,17 @@ class LayTheDrawStrategy(BaseStrategy):
                 wall_clock_mins = elapsed.total_seconds() / 60
                 match_time = max(0, wall_clock_mins - 15) if wall_clock_mins > 50 else wall_clock_mins
 
-            # Wait until half-time (45 mins match time) before hedging first-half goals
-            if match_time < 45:
-                logger.info(
-                    "LTD: Goal detected but waiting for half-time before hedge",
-                    match=market.event_name,
-                    match_time=round(match_time),
-                    score=f"{position.home_goals}-{position.away_goals}" if match_state else "unknown",
-                    current_odds=current_draw_odds,
-                    entry_odds=position.entry_odds,
-                )
-                return None
+            # Hedge immediately when goal detected - don't wait for half-time
+            # Previous logic waited until 45 mins, but this missed opportunities
+            # when equalizers happened before half-time (turning winning positions into draws)
+            logger.info(
+                "LTD: Goal detected - proceeding with hedge",
+                match=market.event_name,
+                match_time=round(match_time),
+                score=f"{position.home_goals}-{position.away_goals}" if match_state else "unknown",
+                current_odds=current_draw_odds,
+                entry_odds=position.entry_odds,
+            )
 
             # "Let winners run" - Don't hedge at/after 88 mins (injury time)
             if match_time >= 88:

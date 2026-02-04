@@ -418,18 +418,18 @@ class LTDStreamMonitor:
             )
             return  # Don't hedge, odds too low
 
-        # Wait until half-time (45 mins match time) before hedging first-half goals
-        if match_time < 45:
-            logger.info(
-                "GOAL DETECTED - Waiting for half-time before hedge",
-                match=position.event_name,
-                market_id=position.market_id,
-                match_time=round(match_time),
-                score=f"{home_score}-{away_score}" if score_diff > 0 else "unknown",
-                current_odds=current_odds,
-                entry_odds=position.entry_odds,
-            )
-            return  # Don't hedge yet
+        # Hedge immediately when goal detected - don't wait for half-time
+        # Previous logic waited until 45 mins, but this missed opportunities
+        # when equalizers happened before half-time (turning winning positions into draws)
+        logger.info(
+            "GOAL DETECTED - Proceeding with hedge",
+            match=position.event_name,
+            market_id=position.market_id,
+            match_time=round(match_time),
+            score=f"{home_score}-{away_score}" if score_diff > 0 else "unknown",
+            current_odds=current_odds,
+            entry_odds=position.entry_odds,
+        )
 
         # "Let winners run" - Don't hedge at/after 88 mins (injury time)
         if match_time >= 88:

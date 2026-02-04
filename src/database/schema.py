@@ -44,6 +44,7 @@ class MarketRecord(Base):
     country_code: Mapped[Optional[str]] = mapped_column(String(10))
     status: Mapped[str] = mapped_column(String(20), default="OPEN")
     total_matched: Mapped[float] = mapped_column(Float, default=0.0)
+    event_id: Mapped[Optional[int]] = mapped_column(Integer)  # Betfair event ID for in-play data
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     # Relationships

@@ -429,17 +429,10 @@ class LayTheDrawStrategy(BaseStrategy):
                 entry_odds=position.entry_odds,
             )
 
-            # "Let winners run" - Don't hedge at/after 88 mins (injury time)
-            if match_time >= 88:
-                logger.info(
-                    "LTD: Late game - letting LAY win, no hedge needed",
-                    match=market.event_name,
-                    match_time=round(match_time),
-                    score=f"{position.home_goals}-{position.away_goals}" if match_state else "unknown",
-                    current_odds=current_draw_odds,
-                    entry_odds=position.entry_odds,
-                )
-                return None
+            # 88-minute rule REMOVED (2026-02-05)
+            # Previously skipped hedge at 88+ mins assuming LAY would win
+            # But late equalizers (like Xelaju v Monterrey 1-1) cost full liability
+            # Now we always hedge when we can lock in profit
 
             # "Let winners run" - Don't hedge when score difference is 2+ goals
             # BUT only apply this late in the game (75+ mins) - early 2-0 can still come back

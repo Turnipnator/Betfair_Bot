@@ -1177,27 +1177,31 @@ class PaperTradingEngine:
         Performs risk checks, places the order via Betfair API,
         then tracks the bet in the simulator for bankroll management.
         """
-        # Risk checks (same as simulator does)
-        risk_check = risk_manager.check_bet_allowed(
-            stake=signal.stake,
-            odds=signal.odds,
-            bet_type=signal.bet_type,
-            market_id=signal.market_id,
-            bankroll=self._simulator.bankroll,
-        )
+        # Skip risk checks for hedge bets - they reduce exposure, not increase it
+        is_hedge = (signal.strategy == "ltd_hedge" and signal.bet_type == BetType.BACK)
 
-        if not risk_check.allowed:
-            logger.info(
-                "Bet rejected by risk manager",
-                selection=signal.selection_name,
-                reason=risk_check.reason,
+        if not is_hedge:
+            # Risk checks (same as simulator does)
+            risk_check = risk_manager.check_bet_allowed(
                 stake=signal.stake,
+                odds=signal.odds,
+                bet_type=signal.bet_type,
+                market_id=signal.market_id,
+                bankroll=self._simulator.bankroll,
             )
-            return False, risk_check.reason, None
 
-        # Use adjusted stake if risk manager modified it
-        if risk_check.adjusted_stake:
-            signal.stake = risk_check.adjusted_stake
+            if not risk_check.allowed:
+                logger.info(
+                    "Bet rejected by risk manager",
+                    selection=signal.selection_name,
+                    reason=risk_check.reason,
+                    stake=signal.stake,
+                )
+                return False, risk_check.reason, None
+
+            # Use adjusted stake if risk manager modified it
+            if risk_check.adjusted_stake:
+                signal.stake = risk_check.adjusted_stake
 
         # Balance check
         if signal.bet_type == BetType.BACK:

@@ -3,6 +3,7 @@
 from src.utils.odds import (
     calculate_back_profit,
     calculate_edge,
+    calculate_freebet_hedge_stake,
     calculate_hedge_stake,
     calculate_lay_liability,
     calculate_overround,
@@ -32,6 +33,7 @@ __all__ = [
     # Odds utilities
     "calculate_back_profit",
     "calculate_edge",
+    "calculate_freebet_hedge_stake",
     "calculate_hedge_stake",
     "calculate_kelly_stake",
     "calculate_lay_liability",

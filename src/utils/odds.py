@@ -262,9 +262,9 @@ def calculate_hedge_stake(
     current_odds: float,
 ) -> float:
     """
-    Calculate stake needed to hedge/close a position.
+    Calculate stake needed to hedge/close a position (equal profit mode).
 
-    For a back bet, this calculates the lay stake needed to lock in profit.
+    Locks in roughly equal profit whether the selection wins or loses.
 
     Args:
         original_stake: Original back stake
@@ -275,3 +275,31 @@ def calculate_hedge_stake(
         Hedge stake needed
     """
     return (original_stake * original_odds) / current_odds
+
+
+def calculate_freebet_hedge_stake(
+    liability: float,
+    current_odds: float,
+    commission_rate: float = 0.05,
+) -> float:
+    """
+    Calculate hedge stake for "free bet" mode.
+
+    Hedges just enough to break even if the draw happens.
+    Keeps full LAY profit when draw doesn't happen (the common case).
+
+    - Not a draw: profit = LAY stake (after commission) - hedge stake
+    - Draw: profit ~= £0 (break-even)
+
+    Args:
+        liability: LAY liability (stake * (odds - 1))
+        current_odds: Current draw BACK odds for hedging
+        commission_rate: Betfair commission rate (default 5%)
+
+    Returns:
+        Hedge stake needed for break-even on draw
+    """
+    effective_payout = (current_odds - 1) * (1 - commission_rate)
+    if effective_payout <= 0:
+        return 0.0
+    return liability / effective_payout

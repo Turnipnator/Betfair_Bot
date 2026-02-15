@@ -18,7 +18,7 @@ from config import settings
 from config.logging_config import get_logger
 from src.models import Bet, BetSignal, BetType, Market, Runner, Sport
 from src.strategies.base import BaseStrategy
-from src.utils import calculate_hedge_stake, round_to_tick
+from src.utils import calculate_freebet_hedge_stake, round_to_tick
 from src.data.football_data import LEAGUE_TIERS, football_data_service
 from src.betfair.client import betfair_client
 
@@ -29,7 +29,7 @@ MAX_LEAGUE_TIER = 2
 
 # Minimum draw odds to hedge - below this, locked profit is too small
 # At 3.6+ (20% above entry), we lock in ~£1.70 profit on £10 stake
-MIN_HEDGE_ODDS = 3.6
+MIN_HEDGE_ODDS = 4.5
 
 # European competitions to include (bypasses domestic stats requirement)
 EUROPEAN_COMPETITIONS = [
@@ -486,11 +486,11 @@ class LayTheDrawStrategy(BaseStrategy):
         """Create signal to exit position."""
         current_odds = draw_runner.best_back_price
 
-        # Calculate hedge stake to close position
-        # For a lay bet, we back to close
-        hedge_stake = calculate_hedge_stake(
-            original_stake=position.entry_stake,
-            original_odds=position.entry_odds,
+        # Calculate hedge stake using "free bet" mode
+        # Hedges just enough to break even if draw happens
+        # Keeps full LAY profit (minus hedge stake) when draw doesn't happen
+        hedge_stake = calculate_freebet_hedge_stake(
+            liability=position.entry_liability,
             current_odds=current_odds,
         )
 

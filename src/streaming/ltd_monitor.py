@@ -14,7 +14,7 @@ from typing import Callable, Optional, Awaitable
 from config.logging_config import get_logger
 from src.models import BetSignal, BetType, Sport
 from src.streaming.stream_manager import StreamManager, MarketUpdate
-from src.utils import calculate_hedge_stake, round_to_tick
+from src.utils import calculate_freebet_hedge_stake, round_to_tick
 from src.betfair.client import betfair_client
 
 logger = get_logger(__name__)
@@ -27,8 +27,8 @@ GOAL_ODDS_SPIKE_THRESHOLD = 1.2
 MIN_ODDS_CHANGE = 0.3
 
 # Minimum draw odds to hedge - below this, locked profit is too small
-# At 3.6+ (20% above entry), we lock in ~£1.70 profit on £10 stake
-MIN_HEDGE_ODDS = 3.6
+# At 4.5+ we get meaningful profit; below this the hedge eats most of the gain
+MIN_HEDGE_ODDS = 4.5
 
 
 @dataclass
@@ -534,10 +534,10 @@ class LTDStreamMonitor:
             BetSignal for the hedge bet
         """
         try:
-            # Calculate hedge stake
-            hedge_stake = calculate_hedge_stake(
-                original_stake=position.entry_stake,
-                original_odds=position.entry_odds,
+            # Calculate hedge stake using "free bet" mode
+            # Break even if draw happens, keep full profit if not
+            hedge_stake = calculate_freebet_hedge_stake(
+                liability=position.entry_liability,
                 current_odds=current_odds,
             )
 
@@ -551,14 +551,11 @@ class LTDStreamMonitor:
             # Round odds to valid tick
             hedge_odds = round_to_tick(current_odds, round_down=True)
 
-            # Calculate expected profit
-            # Original lay: win = stake, lose = liability
-            # Hedge back: win = stake * (odds-1), lose = stake
-            # Combined outcomes:
-            # - Not draw: Win original stake - hedge stake
-            # - Draw: Lose liability + Win hedge profit
-            expected_profit_not_draw = position.entry_stake - hedge_stake
-            expected_profit_draw = (hedge_stake * (hedge_odds - 1)) - position.entry_liability
+            # Calculate expected profit (free bet mode)
+            # Not draw: Keep LAY stake (after commission) minus hedge cost
+            # Draw: Break even (hedge covers liability)
+            expected_profit_not_draw = (position.entry_stake * 0.95) - hedge_stake
+            expected_profit_draw = (hedge_stake * (hedge_odds - 1) * 0.95) - position.entry_liability
 
             logger.debug(
                 "Hedge calculation",

@@ -449,7 +449,7 @@ class PaperTradingEngine:
         # Schedule stale bet settlement (for bets that can't get market data)
         self._scheduler.add_job(
             self.settle_stale_bets,
-            IntervalTrigger(minutes=30),
+            IntervalTrigger(minutes=10),
             id="stale_settlement",
             replace_existing=True,
         )
@@ -518,6 +518,10 @@ class PaperTradingEngine:
 
         # Immediately settle any stale bets from previous runs
         await self.settle_stale_bets()
+
+        # Reconcile with Betfair on startup (catches bets settled since last run)
+        if settings.is_live_mode():
+            await self.reconcile_with_betfair()
 
         # Sync balance with Betfair immediately (LIVE mode)
         if settings.is_live_mode():
@@ -875,7 +879,7 @@ class PaperTradingEngine:
                     pass
 
                 if not event_name:
-                    logger.debug(
+                    logger.info(
                         "Skipping stale bet - no event name",
                         bet_id=bet.bet_ref,
                         selection=bet.selection_name[:30] if bet.selection_name else "N/A",
@@ -895,11 +899,13 @@ class PaperTradingEngine:
                     # 1. Match not yet in football-data (they update daily)
                     # 2. Horse racing (not supported)
                     # 3. Match name doesn't match
-                    logger.debug(
+                    hours_old = (datetime.utcnow() - bet.placed_at).total_seconds() / 3600
+                    logger.info(
                         "No result found for stale bet - will retry later",
                         bet_id=bet.bet_ref,
                         match=event_name,
                         selection=bet.selection_name[:30] if bet.selection_name else "N/A",
+                        hours_old=f"{hours_old:.0f}h",
                     )
                     skipped_count += 1
                     continue
@@ -993,8 +999,10 @@ class PaperTradingEngine:
                 open_bets=len(bets_with_ref),
             )
 
-            # Get cleared orders from Betfair (last 24 hours)
-            cleared_orders = await betfair_client.get_cleared_orders(from_hours=24)
+            # Get cleared orders from Betfair (last 7 days)
+            # Extended window ensures bets are settled even after restarts
+            # where in-memory settlement succeeded but DB write failed
+            cleared_orders = await betfair_client.get_cleared_orders(from_hours=168)
 
             if not cleared_orders:
                 return

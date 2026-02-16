@@ -436,11 +436,12 @@ class LTDStreamMonitor:
         # But late equalizers (like Xelaju v Monterrey 1-1) cost full liability
         # Now we always hedge when we can lock in profit
 
-        # "Let winners run" - Don't hedge when score difference is 2+ goals
-        # BUT only apply this late in the game (75+ mins) - early 2-0 can still come back
-        if score_diff >= 2 and match_time >= 75:
+        # "Let winners run" - Don't hedge when draw is essentially dead
+        # 3+ goal lead at any time - draw virtually impossible
+        # 2+ goal lead after 75 mins - too late for a comeback
+        if score_diff >= 3 or (score_diff >= 2 and match_time >= 75):
             logger.info(
-                "GOAL DETECTED - Dominant scoreline late game, letting LAY win (no hedge)",
+                "GOAL DETECTED - Dominant scoreline, letting LAY win (no hedge)",
                 match=position.event_name,
                 market_id=position.market_id,
                 match_time=round(match_time),

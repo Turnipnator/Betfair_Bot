@@ -27,9 +27,11 @@ logger = get_logger(__name__)
 # League tier settings - only bet on top 2 divisions
 MAX_LEAGUE_TIER = 2
 
-# Minimum draw odds to hedge - below this, locked profit is too small
-# At 3.6+ (20% above entry), we lock in ~£1.70 profit on £10 stake
-MIN_HEDGE_ODDS = 4.5
+# Minimum draw odds to hedge - effectively disabled (set to 20.0)
+# Data from 56 hedged trades showed hedging destroyed value:
+# post-goal draw rate only 14%, hedge cost £138 vs £4 saved
+# To re-enable, lower to 4.5 (meaningful profit) or 3.6 (aggressive)
+MIN_HEDGE_ODDS = 20.0
 
 # European competitions to include (bypasses domestic stats requirement)
 EUROPEAN_COMPETITIONS = [

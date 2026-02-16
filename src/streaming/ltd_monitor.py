@@ -26,9 +26,11 @@ GOAL_ODDS_SPIKE_THRESHOLD = 1.2
 # Minimum odds spike to consider (avoid false positives from small fluctuations)
 MIN_ODDS_CHANGE = 0.3
 
-# Minimum draw odds to hedge - below this, locked profit is too small
-# At 4.5+ we get meaningful profit; below this the hedge eats most of the gain
-MIN_HEDGE_ODDS = 4.5
+# Minimum draw odds to hedge - effectively disabled (set to 20.0)
+# Data from 56 hedged trades showed hedging destroyed value:
+# post-goal draw rate only 14%, hedge cost £138 vs £4 saved
+# To re-enable, lower to 4.5 (meaningful profit) or 3.6 (aggressive)
+MIN_HEDGE_ODDS = 20.0
 
 
 @dataclass

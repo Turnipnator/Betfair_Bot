@@ -1085,6 +1085,16 @@ class PaperTradingEngine:
                 # Settle the bet using Betfair's actual P&L
                 success, _ = self._simulator.settle_bet(bet.id, selection_won)
 
+                if not success:
+                    logger.warning(
+                        "Reconciliation settle_bet FAILED",
+                        bet_ref=bet.bet_ref,
+                        bet_id=bet.id,
+                        selection_won=selection_won,
+                        bet_in_bets=bet.id in self._simulator._bets,
+                        bet_status=self._simulator._bets.get(bet.id, None) and self._simulator._bets[bet.id].status.value,
+                    )
+
                 if success:
                     # Override with Betfair's actual profit (includes exact commission)
                     bet.profit_loss = profit
@@ -1452,7 +1462,14 @@ class PaperTradingEngine:
 
                         # Now save the bet
                         bet_repo = BetRepository(session)
+                        old_id = bet.id
                         bet_id = await bet_repo.save(bet)
+                        if bet_id != old_id:
+                            # Update simulator dict key to match DB ID
+                            # Without this, settle_bet(db_id) can't find the bet
+                            if old_id in self._simulator._bets:
+                                del self._simulator._bets[old_id]
+                            self._simulator._bets[bet_id] = bet
                         bet.id = bet_id
                         await session.commit()
                         logger.info("Bet saved to database", bet_id=bet.bet_ref, db_id=bet_id)

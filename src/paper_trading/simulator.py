@@ -87,8 +87,9 @@ class PaperTradingSimulator:
                 self._bet_counter = max(self._bet_counter, bet.id)
 
                 # Update reserved balance for open bets
+                # Use potential_loss (liability) to match settle_bet/void_bet which subtract it
                 if bet.status != BetStatus.SETTLED:
-                    self._reserved += bet.stake
+                    self._reserved += bet.potential_loss
 
                 loaded += 1
 

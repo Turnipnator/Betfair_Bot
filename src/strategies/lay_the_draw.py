@@ -109,6 +109,11 @@ class LayTheDrawStrategy(BaseStrategy):
     # Minimum goals filter - avoid 0-0 draws which kill LTD
     MIN_TEAM_GOALS_AVG = 0.9  # Teams must avg close to 1 goal/game
 
+    # Maximum favourite odds - ensures a clear favourite who's likely to score
+    # Without this, evenly-matched games (favourite ~2.2) slip through
+    # and draws are much more probable
+    MAX_FAVOURITE_ODDS = 2.0
+
     def __init__(
         self,
         min_draw_odds: float = 3.6,  # Raised from 3.0 - want clear favorite
@@ -263,6 +268,18 @@ class LayTheDrawStrategy(BaseStrategy):
         draw_odds = draw_runner.best_lay_price
 
         if draw_odds < self.min_draw_odds or draw_odds > self.max_draw_odds:
+            return None
+
+        # Check favourite strength - reject balanced matches where draws are likely
+        favourite_odds = self._get_favourite_odds(market)
+        if favourite_odds and favourite_odds > self.MAX_FAVOURITE_ODDS:
+            logger.info(
+                "LTD: Skipping - no clear favourite (too evenly matched)",
+                market=market.event_name,
+                favourite_odds=favourite_odds,
+                max_allowed=self.MAX_FAVOURITE_ODDS,
+                draw_odds=draw_odds,
+            )
             return None
 
         # Check volume
@@ -529,6 +546,17 @@ class LayTheDrawStrategy(BaseStrategy):
             if "draw" in name_lower or name_lower == "the draw":
                 return runner
         return None
+
+    def _get_favourite_odds(self, market: Market) -> Optional[float]:
+        """Get the best back price of the match favourite (lowest odds non-draw runner)."""
+        best_odds = None
+        for runner in market.runners:
+            name_lower = runner.name.lower()
+            if "draw" in name_lower or name_lower == "the draw":
+                continue
+            if runner.best_back_price and (best_odds is None or runner.best_back_price < best_odds):
+                best_odds = runner.best_back_price
+        return best_odds
 
     def record_entry(self, market_id: str, bet: Bet) -> None:
         """Record that entry bet was placed."""

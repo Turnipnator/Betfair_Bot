@@ -112,7 +112,7 @@ class LayTheDrawStrategy(BaseStrategy):
     # Maximum favourite odds - ensures a clear favourite who's likely to score
     # Without this, evenly-matched games (favourite ~2.2) slip through
     # and draws are much more probable
-    MAX_FAVOURITE_ODDS = 2.0
+    MAX_FAVOURITE_ODDS = 1.9
 
     def __init__(
         self,

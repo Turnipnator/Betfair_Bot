@@ -5,7 +5,7 @@ These models represent Betfair market data and runner information.
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
@@ -104,7 +104,7 @@ class Market:
     runners: list[Runner] = field(default_factory=list)
 
     # Timestamps
-    fetched_at: datetime = field(default_factory=datetime.utcnow)
+    fetched_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     @property
     def is_open(self) -> bool:
@@ -114,7 +114,11 @@ class Market:
     @property
     def seconds_to_start(self) -> float:
         """Seconds until market start time."""
-        delta = self.start_time - datetime.utcnow()
+        now = datetime.now(timezone.utc)
+        start = self.start_time
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        delta = start - now
         return delta.total_seconds()
 
     @property

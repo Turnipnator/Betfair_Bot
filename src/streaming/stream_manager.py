@@ -9,7 +9,7 @@ import asyncio
 import queue
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Callable, Optional, Any
 
 import betfairlightweight
@@ -416,8 +416,10 @@ class StreamManager:
                     if self._stream and hasattr(self._stream, 'datetime_last_received'):
                         last_recv = self._stream.datetime_last_received
                         if last_recv:
-                            from datetime import datetime
-                            recv_age = (datetime.utcnow() - last_recv).total_seconds()
+                            now = datetime.now(timezone.utc)
+                            if last_recv.tzinfo is None:
+                                last_recv = last_recv.replace(tzinfo=timezone.utc)
+                            recv_age = (now - last_recv).total_seconds()
                             if recv_age > self._heartbeat_timeout:
                                 logger.warning(
                                     "Stream socket heartbeat timeout",

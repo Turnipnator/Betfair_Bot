@@ -9,7 +9,7 @@ Orchestrates market scanning, strategy evaluation, and bet simulation.
 import asyncio
 import signal
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -849,8 +849,11 @@ class PaperTradingEngine:
                 return
 
             # Threshold: bets placed more than 4 hours ago (match should be finished)
-            stale_threshold = datetime.utcnow() - timedelta(hours=4)
-            stale_bets = [b for b in open_bets if b.placed_at < stale_threshold]
+            stale_threshold = datetime.now(timezone.utc) - timedelta(hours=4)
+            stale_bets = [
+                b for b in open_bets
+                if (b.placed_at.replace(tzinfo=timezone.utc) if b.placed_at.tzinfo is None else b.placed_at) < stale_threshold
+            ]
 
             if not stale_bets:
                 return
@@ -899,7 +902,9 @@ class PaperTradingEngine:
                     # 1. Match not yet in football-data (they update daily)
                     # 2. Horse racing (not supported)
                     # 3. Match name doesn't match
-                    hours_old = (datetime.utcnow() - bet.placed_at).total_seconds() / 3600
+                    now = datetime.now(timezone.utc)
+                    placed = bet.placed_at if bet.placed_at.tzinfo else bet.placed_at.replace(tzinfo=timezone.utc)
+                    hours_old = (now - placed).total_seconds() / 3600
                     logger.info(
                         "No result found for stale bet - will retry later",
                         bet_id=bet.bet_ref,
@@ -1440,9 +1445,8 @@ class PaperTradingEngine:
                         if not existing_market:
                             # Create minimal market record from signal data
                             from src.models import Market, MarketStatus
-                            from datetime import datetime
                             # Use actual start_time from signal (from Betfair), fallback to now
-                            actual_start_time = signal.market_start_time or datetime.utcnow()
+                            actual_start_time = signal.market_start_time or datetime.now(timezone.utc)
                             minimal_market = Market(
                                 market_id=signal.market_id,
                                 market_name=signal.market_name or "Unknown",

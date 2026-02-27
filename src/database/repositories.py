@@ -4,7 +4,7 @@ Database repositories for CRUD operations.
 Provides clean interfaces for interacting with database tables.
 """
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import func, select, update
@@ -72,7 +72,7 @@ class MarketRepository:
 
     async def get_recent(self, hours: int = 24) -> list[MarketRecord]:
         """Get markets from the last N hours."""
-        cutoff = datetime.utcnow() - timedelta(hours=hours)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
         result = await self.session.execute(
             select(MarketRecord)
             .where(MarketRecord.start_time >= cutoff)
@@ -172,7 +172,7 @@ class BetRepository:
 
     async def get_todays_bets(self, is_paper: bool = True) -> list[BetRecord]:
         """Get all bets placed today."""
-        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
         result = await self.session.execute(
             select(BetRecord)
             .where(BetRecord.is_paper == is_paper)

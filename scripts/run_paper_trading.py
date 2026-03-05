@@ -984,9 +984,11 @@ class PaperTradingEngine:
             return
 
         if not self._simulator:
+            logger.warning("Reconciliation: no simulator")
             return
 
         if not betfair_client.is_logged_in:
+            logger.warning("Reconciliation: not logged in to Betfair")
             return
 
         try:
@@ -997,6 +999,11 @@ class PaperTradingEngine:
             # Only reconcile bets that have a Betfair bet reference
             bets_with_ref = [b for b in open_bets if b.bet_ref and not b.bet_ref.startswith("PAPER-")]
             if not bets_with_ref:
+                logger.info(
+                    "Reconciliation: open bets have no Betfair refs",
+                    open_count=len(open_bets),
+                    refs=[b.bet_ref for b in open_bets],
+                )
                 return
 
             logger.info(
@@ -1010,6 +1017,7 @@ class PaperTradingEngine:
             cleared_orders = await betfair_client.get_cleared_orders(from_hours=168)
 
             if not cleared_orders:
+                logger.warning("Reconciliation: no cleared orders from Betfair")
                 return
 
             # Index cleared orders by bet_id (as string) for fast lookup

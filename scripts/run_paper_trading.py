@@ -667,8 +667,49 @@ class PaperTradingEngine:
                     if signal:
                         await self.process_signal(signal)
 
+            # Check LTD candidates for half-time 0-0 entry
+            await self._check_ltd_halftime_candidates()
+
         except Exception as e:
             logger.error("Error scanning markets", error=str(e))
+
+    async def _check_ltd_halftime_candidates(self) -> None:
+        """Check LTD candidates for half-time 0-0 entry."""
+        from src.strategies.lay_the_draw import LayTheDrawStrategy
+
+        # Find the LTD strategy instance
+        ltd_strategy = None
+        for strategy in self._strategies:
+            if isinstance(strategy, LayTheDrawStrategy) and strategy.is_enabled:
+                ltd_strategy = strategy
+                break
+
+        if not ltd_strategy:
+            return
+
+        # Clean up expired candidates
+        ltd_strategy.cleanup_expired_candidates()
+
+        candidates = ltd_strategy.get_candidates()
+        if not candidates:
+            return
+
+        # Fetch in-play prices for candidate markets
+        candidate_ids = list(candidates.keys())
+        if not betfair_client.is_logged_in:
+            return
+
+        try:
+            markets_with_prices = await betfair_client.get_market_prices(candidate_ids)
+        except Exception as e:
+            logger.debug("Error fetching candidate market prices", error=str(e))
+            return
+
+        # Check each candidate for HT 0-0 entry
+        for market_id, market in markets_with_prices.items():
+            signal = await ltd_strategy.evaluate_halftime(market)
+            if signal:
+                await self.process_signal(signal)
 
     async def _observe_tennis_markets(self, markets: list) -> None:
         """

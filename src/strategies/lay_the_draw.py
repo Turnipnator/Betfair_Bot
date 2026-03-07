@@ -2,15 +2,15 @@
 Lay the Draw Strategy.
 
 Football in-play strategy that:
-1. Lays the draw pre-match when odds are in target range
-2. Backs the draw after a goal is scored to lock in profit
-3. Cuts losses if no goal after set time
+1. Identifies candidate matches pre-match using strict filters
+2. Waits for 0-0 at half-time, then lays the draw at lower odds
+3. Backs the draw after a goal is scored to lock in profit
 
-State machine approach for position management.
+Half-time entry dramatically reduces liability compared to pre-match entry.
 """
 
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
@@ -40,16 +40,42 @@ EUROPEAN_COMPETITIONS = [
     "uefa conference", "uecl",
 ]
 
+# Half-time entry draw odds range
+# At 0-0 HT, draw odds are typically 1.8-2.5
+# Lower = market thinks draw likely (defensive game) → avoid
+# Higher = market thinks goal coming → good
+MIN_HT_DRAW_ODDS = 1.9
+MAX_HT_DRAW_ODDS = 2.8
+
+# Minimum market liquidity (total matched on market) to ensure fair exit prices
+MIN_MARKET_LIQUIDITY = 50_000  # £50k
+
 
 class LTDState(str, Enum):
     """Lay the Draw position states."""
 
-    WAITING = "WAITING"  # Looking for entry
+    CANDIDATE = "CANDIDATE"  # Pre-match candidate, waiting for HT 0-0
     POSITION_OPEN = "POSITION_OPEN"  # Lay placed, waiting for goal
     GOAL_SCORED = "GOAL_SCORED"  # Goal scored, ready to trade out
     TRADED_OUT = "TRADED_OUT"  # Position closed for profit
     LOSS_CUT = "LOSS_CUT"  # Position closed at loss
     EXPIRED = "EXPIRED"  # Market closed without action
+
+
+@dataclass
+class LTDCandidate:
+    """A match identified as suitable for LTD, waiting for half-time 0-0."""
+    market_id: str
+    event_name: str
+    selection_id: int  # Draw runner selection ID
+    event_id: Optional[int] = None
+    start_time: Optional[datetime] = None
+    competition: Optional[str] = None
+    market_name: Optional[str] = None
+    home_goals_avg: float = 0.0
+    away_goals_avg: float = 0.0
+    favourite_odds: float = 0.0
+    identified_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 @dataclass
@@ -83,75 +109,64 @@ class LTDPosition:
 
     def __post_init__(self):
         if self.created_at is None:
-            self.created_at = datetime.utcnow()
-        self.updated_at = datetime.utcnow()
+            self.created_at = datetime.now(timezone.utc)
+        self.updated_at = datetime.now(timezone.utc)
 
 
 class LayTheDrawStrategy(BaseStrategy):
     """
-    Lay the Draw in-play football strategy.
+    Lay the Draw half-time entry strategy.
 
-    Entry criteria:
-    - Draw odds between 3.0 and 4.0 (configurable)
-    - Teams likely to score (avoid defensive matches)
-    - Avoid cup finals, derbies (unpredictable)
-    - Minimum liquidity
+    Pre-match: Identifies candidate matches using strict filters.
+    Half-time: If 0-0 at half-time, lays the draw at lower odds (~2.0).
+    In-play: Monitors for goals and manages exit.
 
-    Exit criteria:
-    - Back draw after goal for guaranteed profit
-    - Cut loss after X minutes without goal
+    Half-time entry halves the liability vs pre-match entry:
+    - Pre-match lay at 3.5-4.0 → liability £25-30 per £10
+    - HT lay at 2.0-2.5 → liability £10-15 per £10
+    - Breakeven drops from ~75% to ~55% win rate
     """
 
     name: str = "lay_the_draw"
     supported_sports: list[Sport] = [Sport.FOOTBALL]
-    requires_inplay: bool = False  # Entry is pre-play
+    requires_inplay: bool = False  # Pre-match for candidate identification
 
-    # Minimum goals filter - avoid 0-0 draws which kill LTD
-    MIN_TEAM_GOALS_AVG = 0.9  # Teams must avg close to 1 goal/game
+    # Home team must score 1.5+ goals per home game on average
+    MIN_HOME_GOALS_AVG = 1.5
+
+    # Away team must also score (keeps games open, avoids dead games)
+    MIN_AWAY_GOALS_AVG = 0.9
+
+    # Home team conceding < 1.25 at home (solid at home, less likely to draw)
+    MAX_HOME_CONCEDED_AVG = 1.25
 
     # Maximum favourite odds - ensures a clear favourite who's likely to score
-    # Without this, evenly-matched games (favourite ~2.2) slip through
-    # and draws are much more probable
     MAX_FAVOURITE_ODDS = 1.9
 
-    def __init__(
-        self,
-        min_draw_odds: float = 3.6,  # Raised from 3.0 - want clear favorite
-        max_draw_odds: float = 4.0,  # Raised from 3.5 - clear favorite = more goals
-        min_market_volume: float = 0.0,  # Disabled for paper trading - no volume filter
-        cut_loss_minute: int = 70,
-        min_profit_percent: float = 0.5,
-    ) -> None:
-        """
-        Initialize Lay the Draw strategy.
+    # Pre-match draw odds range for candidate identification
+    # Wider than old entry range since we only enter at HT when odds are lower
+    MIN_PREMATCH_DRAW_ODDS = 3.0
+    MAX_PREMATCH_DRAW_ODDS = 5.0
 
-        Args:
-            min_draw_odds: Minimum draw odds to enter
-            max_draw_odds: Maximum draw odds to enter
-            min_market_volume: Minimum matched volume on draw
-            cut_loss_minute: Minute to cut losses if no goal
-            min_profit_percent: Minimum profit % to exit after goal
-        """
+    def __init__(self) -> None:
+        """Initialize Lay the Draw strategy."""
         super().__init__()
-
-        self.min_draw_odds = min_draw_odds
-        self.max_draw_odds = max_draw_odds
-        self.min_market_volume = min_market_volume
-        self.cut_loss_minute = cut_loss_minute
-        self.min_profit_percent = min_profit_percent
 
         # Track open positions by market
         self._positions: dict[str, LTDPosition] = {}
 
+        # Track candidates waiting for half-time 0-0 entry
+        self._candidates: dict[str, LTDCandidate] = {}
+
     async def evaluate(self, market: Market) -> Optional[BetSignal]:
         """
-        Evaluate market for LTD entry opportunity.
+        Evaluate market for LTD candidacy (pre-match).
 
-        Args:
-            market: Football match odds market
+        Does NOT place bets. Stores qualifying matches as candidates
+        for half-time 0-0 entry via evaluate_halftime().
 
         Returns:
-            BetSignal to lay the draw, or None
+            Always None (candidates are stored internally)
         """
         logger.info(
             "LTD: Evaluating market",
@@ -163,17 +178,22 @@ class LayTheDrawStrategy(BaseStrategy):
         if not self.pre_evaluate(market):
             return None
 
-        # Only enter if we don't have a position
+        # Skip if already a candidate or has a position
+        if market.market_id in self._candidates:
+            return None
         if market.market_id in self._positions:
             return None
 
-        # Must be pre-play
+        # Must be pre-play for candidate identification
         if market.in_play:
             return None
 
         # Filter: League tier check - only bet on tier 1 & 2 leagues
         # REQUIRE football-data.co.uk coverage - no data = no bet
         # EXCEPTION: Champions League (high quality matches, good liquidity)
+        home_goals_avg = 0.0
+        away_goals_avg = 0.0
+
         if market.event_name and " v " in market.event_name:
             parts = market.event_name.split(" v ")
             if len(parts) == 2:
@@ -188,12 +208,11 @@ class LayTheDrawStrategy(BaseStrategy):
 
                 # Check if this is a Champions League match (bypass stats requirement)
                 competition_lower = (market.competition or "").lower()
-                is_champions_league = any(comp in competition_lower for comp in EUROPEAN_COMPETITIONS)
+                is_european = any(comp in competition_lower for comp in EUROPEAN_COMPETITIONS)
 
-                if is_champions_league:
-                    # Champions League - skip stats filtering, just check draw odds
+                if is_european:
                     logger.info(
-                        "LTD: Champions League match - bypassing stats requirement",
+                        "LTD: European competition - bypassing stats requirement",
                         market=market.event_name,
                         competition=market.competition,
                     )
@@ -209,45 +228,55 @@ class LayTheDrawStrategy(BaseStrategy):
                                 market=market.event_name,
                                 league=league_stats.league_code,
                                 tier=league_tier,
-                                max_tier=MAX_LEAGUE_TIER,
                             )
                             return None
 
-                        # Filter: Both teams must average enough goals to avoid 0-0 draws
                         home_goals_avg = home_stats.home_scored_avg if home_stats.home_played >= 3 else 0
                         away_goals_avg = away_stats.away_scored_avg if away_stats.away_played >= 3 else 0
+                        home_conceded_avg = home_stats.home_conceded_avg if home_stats.home_played >= 3 else 99
 
-                        if home_goals_avg < self.MIN_TEAM_GOALS_AVG:
+                        # Priority 2: Tighter goals filters
+                        # Home team must be prolific scorers at home
+                        if home_goals_avg < self.MIN_HOME_GOALS_AVG:
                             logger.debug(
-                                "LTD: Skipping - home team low scoring",
+                                "LTD: Skipping - home team not scoring enough",
                                 market=market.event_name,
                                 home_goals_avg=f"{home_goals_avg:.2f}",
-                                min_required=self.MIN_TEAM_GOALS_AVG,
+                                min_required=self.MIN_HOME_GOALS_AVG,
                             )
                             return None
 
-                        if away_goals_avg < self.MIN_TEAM_GOALS_AVG:
+                        # Away team must also contribute goals
+                        if away_goals_avg < self.MIN_AWAY_GOALS_AVG:
                             logger.debug(
                                 "LTD: Skipping - away team low scoring",
                                 market=market.event_name,
                                 away_goals_avg=f"{away_goals_avg:.2f}",
-                                min_required=self.MIN_TEAM_GOALS_AVG,
+                                min_required=self.MIN_AWAY_GOALS_AVG,
+                            )
+                            return None
+
+                        # Home team must be solid defensively (reduces draw probability)
+                        if home_conceded_avg > self.MAX_HOME_CONCEDED_AVG:
+                            logger.debug(
+                                "LTD: Skipping - home team concedes too much",
+                                market=market.event_name,
+                                home_conceded_avg=f"{home_conceded_avg:.2f}",
+                                max_allowed=self.MAX_HOME_CONCEDED_AVG,
                             )
                             return None
 
                         logger.info(
                             "LTD: Teams pass goals filter",
                             market=market.event_name,
-                            home_goals_avg=f"{home_goals_avg:.2f}",
-                            away_goals_avg=f"{away_goals_avg:.2f}",
+                            home_scored_avg=f"{home_goals_avg:.2f}",
+                            home_conceded_avg=f"{home_conceded_avg:.2f}",
+                            away_scored_avg=f"{away_goals_avg:.2f}",
                         )
                     else:
-                        # NO DATA = NO BET - don't bet on leagues we can't verify
                         logger.debug(
                             "LTD: Skipping - no football-data.co.uk coverage",
                             market=market.event_name,
-                            home=home_team,
-                            away=away_team,
                         )
                         return None
 
@@ -256,18 +285,18 @@ class LayTheDrawStrategy(BaseStrategy):
         if not draw_runner:
             return None
 
-        # Check draw odds in range
+        # Check pre-match draw odds are in sensible range
         if not draw_runner.best_lay_price:
-            logger.info(
-                "LTD: No lay price",
-                market=market.event_name,
-                back_price=draw_runner.best_back_price,
-            )
             return None
 
         draw_odds = draw_runner.best_lay_price
-
-        if draw_odds < self.min_draw_odds or draw_odds > self.max_draw_odds:
+        if draw_odds < self.MIN_PREMATCH_DRAW_ODDS or draw_odds > self.MAX_PREMATCH_DRAW_ODDS:
+            logger.info(
+                "LTD: Draw odds outside pre-match range",
+                market=market.event_name,
+                draw_odds=draw_odds,
+                range=f"{self.MIN_PREMATCH_DRAW_ODDS}-{self.MAX_PREMATCH_DRAW_ODDS}",
+            )
             return None
 
         # Check favourite strength - reject balanced matches where draws are likely
@@ -282,29 +311,109 @@ class LayTheDrawStrategy(BaseStrategy):
             )
             return None
 
-        # Check volume
-        if draw_runner.total_matched < self.min_market_volume:
+        # Priority 3: Liquidity filter
+        if market.total_matched < MIN_MARKET_LIQUIDITY:
             logger.info(
-                "LTD: Volume too low",
+                "LTD: Skipping - insufficient liquidity",
                 market=market.event_name,
-                draw_odds=draw_odds,
-                volume=draw_runner.total_matched,
-                min_required=self.min_market_volume,
+                matched=f"£{market.total_matched:,.0f}",
+                min_required=f"£{MIN_MARKET_LIQUIDITY:,.0f}",
             )
             return None
 
-        # Log when we pass all checks
-        logger.info(
-            "LTD: Evaluating opportunity",
-            market=market.event_name,
-            draw_odds=draw_odds,
-            volume=draw_runner.total_matched,
+        # Store as candidate — don't place bet yet, wait for HT 0-0
+        self._candidates[market.market_id] = LTDCandidate(
+            market_id=market.market_id,
+            event_name=market.event_name,
+            selection_id=draw_runner.selection_id,
+            event_id=market.event_id,
+            start_time=market.start_time,
+            competition=market.competition,
+            market_name=market.market_name,
+            home_goals_avg=home_goals_avg,
+            away_goals_avg=away_goals_avg,
+            favourite_odds=favourite_odds or 0.0,
         )
 
-        # Additional filters could go here:
-        # - Check it's not a cup final
-        # - Check both teams have scored recently
-        # - Check historical goal stats
+        logger.info(
+            "LTD: Candidate stored - waiting for HT 0-0",
+            market=market.event_name,
+            draw_odds=draw_odds,
+            favourite_odds=favourite_odds,
+            liquidity=f"£{market.total_matched:,.0f}",
+        )
+
+        # Never return a signal from evaluate — entry is via evaluate_halftime
+        return None
+
+    async def evaluate_halftime(self, market: Market) -> Optional[BetSignal]:
+        """
+        Check if a candidate match is 0-0 at half-time and ready for entry.
+
+        Called with in-play market data for candidate matches.
+
+        Returns:
+            BetSignal to lay the draw if 0-0 at HT, or None
+        """
+        candidate = self._candidates.get(market.market_id)
+        if not candidate:
+            return None
+
+        # Must be in-play
+        if not market.in_play:
+            return None
+
+        # Already have a position (shouldn't happen, but safety check)
+        if market.market_id in self._positions:
+            return None
+
+        # Get match state from Betfair
+        match_state = None
+        if candidate.event_id:
+            try:
+                match_state = await betfair_client.get_match_state(candidate.event_id)
+            except Exception as e:
+                logger.debug("Could not fetch match state for candidate", error=str(e))
+
+        if not match_state:
+            return None
+
+        # Must be 0-0
+        if match_state.home_score != 0 or match_state.away_score != 0:
+            # Goal scored — no longer a candidate
+            logger.info(
+                "LTD: Candidate removed - goal scored before HT entry",
+                market=candidate.event_name,
+                score=f"{match_state.home_score}-{match_state.away_score}",
+            )
+            del self._candidates[market.market_id]
+            return None
+
+        # Must be around half-time or early second half (40-65 mins)
+        match_time = match_state.match_time
+        is_halftime = match_state.status == "HalfTime"
+
+        if not is_halftime and (match_time < 40 or match_time > 65):
+            return None
+
+        # Find the draw runner and check current odds
+        draw_runner = self._find_draw_runner(market)
+        if not draw_runner or not draw_runner.best_lay_price:
+            return None
+
+        draw_odds = draw_runner.best_lay_price
+
+        if draw_odds < MIN_HT_DRAW_ODDS or draw_odds > MAX_HT_DRAW_ODDS:
+            logger.info(
+                "LTD: HT draw odds outside range",
+                market=candidate.event_name,
+                draw_odds=draw_odds,
+                range=f"{MIN_HT_DRAW_ODDS}-{MAX_HT_DRAW_ODDS}",
+            )
+            return None
+
+        # Remove from candidates — we're entering
+        del self._candidates[market.market_id]
 
         # Calculate stake (placeholder - will be set by execution)
         stake = 10.0
@@ -318,16 +427,49 @@ class LayTheDrawStrategy(BaseStrategy):
             stake=stake,
             strategy=self.name,
             sport=Sport.FOOTBALL,
-            market_name=market.market_name,
-            event_name=market.event_name,
-            competition=market.competition,
-            reason=f"LTD entry: Draw @ {draw_odds:.2f}",
-            market_start_time=market.start_time,
-            event_id=market.event_id,
+            market_name=market.market_name or candidate.market_name,
+            event_name=market.event_name or candidate.event_name,
+            competition=market.competition or candidate.competition,
+            reason=f"LTD HT entry: Draw @ {draw_odds:.2f} (0-0 at {match_time}')",
+            market_start_time=market.start_time or candidate.start_time,
+            event_id=market.event_id or candidate.event_id,
+        )
+
+        logger.info(
+            "LTD: Half-time 0-0 entry!",
+            market=candidate.event_name,
+            draw_odds=draw_odds,
+            match_time=match_time,
+            liability=f"£{stake * (draw_odds - 1):.2f}",
         )
 
         self.log_signal(signal)
         return signal
+
+    def get_candidates(self) -> dict[str, LTDCandidate]:
+        """Get current candidates waiting for HT entry."""
+        return self._candidates
+
+    def cleanup_expired_candidates(self) -> int:
+        """Remove candidates for matches that have been going too long (>70 mins)."""
+        now = datetime.now(timezone.utc)
+        expired = []
+        for market_id, candidate in self._candidates.items():
+            if candidate.start_time:
+                start = candidate.start_time
+                if start.tzinfo is None:
+                    start = start.replace(tzinfo=timezone.utc)
+                elapsed_mins = (now - start).total_seconds() / 60
+                # If match started 80+ mins ago (including HT break), remove
+                if elapsed_mins > 80:
+                    expired.append(market_id)
+        for market_id in expired:
+            logger.info(
+                "LTD: Candidate expired",
+                market=self._candidates[market_id].event_name,
+            )
+            del self._candidates[market_id]
+        return len(expired)
 
     def manage_position(
         self,
@@ -481,7 +623,7 @@ class LayTheDrawStrategy(BaseStrategy):
                 return None
 
             position.state = LTDState.GOAL_SCORED
-            position.updated_at = datetime.utcnow()
+            position.updated_at = datetime.now(timezone.utc)
 
             # Trade out for profit
             return self._create_exit_signal(market, draw_runner, position, "goal")
@@ -572,7 +714,7 @@ class LayTheDrawStrategy(BaseStrategy):
         position.entry_stake = bet.stake
         position.entry_liability = bet.potential_loss
         position.state = LTDState.POSITION_OPEN
-        position.updated_at = datetime.utcnow()
+        position.updated_at = datetime.now(timezone.utc)
 
     def record_exit(self, market_id: str, bet: Bet, pnl: float) -> None:
         """Record that exit bet was placed."""
@@ -584,7 +726,7 @@ class LayTheDrawStrategy(BaseStrategy):
         position.exit_odds = bet.matched_odds
         position.profit_loss = pnl
         position.state = LTDState.TRADED_OUT if pnl > 0 else LTDState.LOSS_CUT
-        position.updated_at = datetime.utcnow()
+        position.updated_at = datetime.now(timezone.utc)
 
     def mark_hedged(self, market_id: str, exit_odds: float = 0.0) -> None:
         """
@@ -607,7 +749,7 @@ class LayTheDrawStrategy(BaseStrategy):
         position = self._positions[market_id]
         position.state = LTDState.TRADED_OUT
         position.exit_odds = exit_odds
-        position.updated_at = datetime.utcnow()
+        position.updated_at = datetime.now(timezone.utc)
 
         logger.info(
             "Marked LTD position as hedged",

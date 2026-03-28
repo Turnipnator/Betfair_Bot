@@ -141,7 +141,7 @@ class StrategySettings(BaseSettings):
         description="Minimum odds to consider for value bets",
     )
     value_max_odds: float = Field(
-        default=2.50,  # Widened from 2.10 to get more action
+        default=2.00,  # Tightened from 2.50 - Poisson model overestimates at higher odds (2W/7L above 2.0)
         alias="VALUE_MAX_ODDS",
         description="Maximum odds to consider for value bets",
     )

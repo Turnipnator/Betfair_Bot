@@ -158,12 +158,16 @@ class BetfairClient:
 
     async def keep_alive(self) -> bool:
         """
-        Keep the session alive.
+        Keep the session alive, re-logging in if the session has dropped.
 
         Should be called periodically (Betfair sessions expire after ~20 mins).
         """
         if not self.is_logged_in:
-            return False
+            # Session was lost (e.g. previous keep-alive failed, or transient
+            # auth error). Attempt re-login so trading can resume automatically
+            # instead of sitting idle until the container is restarted.
+            logger.warning("Session not active, attempting re-login")
+            return await self.login()
 
         try:
             loop = asyncio.get_event_loop()
@@ -171,7 +175,7 @@ class BetfairClient:
             logger.debug("Session keep-alive successful")
             return True
         except Exception as e:
-            logger.error("Keep-alive failed", error=str(e))
+            logger.error("Keep-alive failed, will retry login next cycle", error=str(e))
             self._logged_in = False
             return False
 

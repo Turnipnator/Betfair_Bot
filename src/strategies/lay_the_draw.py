@@ -48,7 +48,7 @@ MIN_HT_DRAW_ODDS = 1.9
 MAX_HT_DRAW_ODDS = 2.8
 
 # Minimum market liquidity (total matched on market) to ensure fair exit prices
-MIN_MARKET_LIQUIDITY = 40_000  # £40k
+MIN_MARKET_LIQUIDITY = 25_000  # £25k
 
 
 class LTDState(str, Enum):

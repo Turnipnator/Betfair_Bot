@@ -141,7 +141,7 @@ class LayTheDrawStrategy(BaseStrategy):
     MAX_HOME_CONCEDED_AVG = 1.25
 
     # Maximum favourite odds - ensures a clear favourite who's likely to score
-    MAX_FAVOURITE_ODDS = 1.9
+    MAX_FAVOURITE_ODDS = 2.0
 
     # Pre-match draw odds range for candidate identification
     # Wider than old entry range since we only enter at HT when odds are lower

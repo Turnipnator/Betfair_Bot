@@ -304,7 +304,7 @@ class ValueBettingStrategy(BaseStrategy):
     # Big 5 leagues only - where xG data is available for better predictions
     # Backtest showed +20% ROI on big 5 vs negative ROI on other leagues
     BIG_5_LEAGUES = {"E0", "SP1", "D1", "I1", "F1"}  # EPL, La Liga, Bundesliga, Serie A, Ligue 1
-    REQUIRE_BIG_5 = True  # Only bet on big 5 leagues
+    REQUIRE_BIG_5 = False  # Disabled 2026-05-10 — broadening to tier 1/2 leagues for volume; CLV will tell us if non-Big-5 has edge
 
     # Draw exclusion - we have LTD strategy for draws
     EXCLUDE_DRAWS = True

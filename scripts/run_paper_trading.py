@@ -35,7 +35,7 @@ from src.strategies import (
 )
 from src.telegram_bot import telegram_bot, notifier
 from src.reporting import report_generator, daily_report_generator
-from src.utils import calculate_stake, calculate_kelly_stake
+from src.utils import calculate_stake, calculate_kelly_stake, compute_clv_percent
 from src.data.football_data import football_data_service
 from src.betfair.execution import order_executor
 from src.streaming.stream_manager import StreamManager
@@ -460,6 +460,16 @@ class PaperTradingEngine:
             self.reconcile_with_betfair,
             IntervalTrigger(minutes=5),
             id="betfair_reconciliation",
+            replace_existing=True,
+        )
+
+        # Schedule closing-line snapshot for CLV tracking.
+        # Runs slightly out-of-phase with reconciliation so bets are settled
+        # before we try to grab their close price.
+        self._scheduler.add_job(
+            self.record_closing_lines,
+            IntervalTrigger(minutes=7),
+            id="record_closing_lines",
             replace_existing=True,
         )
 
@@ -1196,6 +1206,90 @@ class PaperTradingEngine:
 
         except Exception as e:
             logger.error("Error reconciling with Betfair", error=str(e))
+
+    async def record_closing_lines(self) -> None:
+        """
+        Snapshot the closing line price for recently-settled bets and store CLV.
+
+        CLV (Closing Line Value) is the % gap between our matched odds and the
+        market's last traded price on our selection. Positive CLV means we beat
+        the market; sustained positive CLV is the strongest leading indicator
+        of real edge — it shows up in dozens of bets rather than the hundreds
+        needed for W/L variance to reveal whether a strategy works.
+
+        Capture strategy: query SETTLED bets with no close snapshot yet, batch
+        their market_ids (Betfair caps list_market_book at 10/call), pull the
+        post-settlement last_price_traded for each runner, compute CLV, persist.
+        Bets older than 7 days are dropped from the queue — Betfair purges old
+        market state, so they're unrecoverable.
+        """
+        if not betfair_client.is_logged_in:
+            return
+
+        try:
+            async with db.session() as session:
+                bet_repo = BetRepository(session)
+                pending = await bet_repo.get_settled_without_clv(limit=100)
+
+            if not pending:
+                return
+
+            # Unique market_ids, capped — we'll catch the rest on next tick
+            market_ids = list({b.market_id for b in pending})
+
+            markets = await betfair_client.get_market_prices(market_ids)
+            if not markets:
+                logger.debug("CLV capture: no markets returned", requested=len(market_ids))
+                return
+
+            recorded = 0
+            now = datetime.now(timezone.utc)
+
+            async with db.session() as session:
+                bet_repo = BetRepository(session)
+
+                for bet in pending:
+                    market = markets.get(bet.market_id)
+                    if not market:
+                        continue
+
+                    runner = market.get_runner(bet.selection_id)
+                    if runner is None or runner.last_price_traded is None:
+                        continue
+
+                    clv = compute_clv_percent(
+                        matched_odds=bet.matched_odds,
+                        close_price=runner.last_price_traded,
+                        bet_type=bet.bet_type,
+                    )
+                    if clv is None:
+                        continue
+
+                    await bet_repo.record_closing_price(
+                        bet_id=bet.id,
+                        close_price=runner.last_price_traded,
+                        clv_percent=clv,
+                        close_recorded_at=now,
+                    )
+                    recorded += 1
+
+                    logger.info(
+                        "CLV recorded",
+                        bet_id=bet.id,
+                        strategy=bet.strategy,
+                        bet_type=bet.bet_type,
+                        matched_odds=bet.matched_odds,
+                        close_price=runner.last_price_traded,
+                        clv_pct=f"{clv:+.2f}%",
+                    )
+
+                await session.commit()
+
+            if recorded > 0:
+                logger.info("CLV capture cycle complete", recorded=recorded, queued=len(pending))
+
+        except Exception as e:
+            logger.warning("Error recording closing lines", error=str(e)[:200])
 
     async def sync_balance_with_betfair(self) -> None:
         """

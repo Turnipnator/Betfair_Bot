@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncGenerator, Optional
 
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -75,6 +75,7 @@ class DatabaseConnection:
 
         # Create tables
         await self._create_tables()
+        await self._run_migrations()
         logger.info("Database initialized successfully")
 
     async def _create_tables(self) -> None:
@@ -83,6 +84,33 @@ class DatabaseConnection:
 
         async with self._engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+
+    async def _run_migrations(self) -> None:
+        """
+        Apply lightweight, idempotent column-add migrations.
+
+        SQLAlchemy's create_all only creates missing tables — it does NOT add
+        new columns to existing tables. So when we add fields to an ORM model,
+        any existing deployment (e.g. the VPS) keeps the old shape until we
+        explicitly ALTER. This helper runs targeted ADD COLUMN statements,
+        guarded by PRAGMA introspection so it's safe to run on every boot.
+        """
+        if settings.database_type != DatabaseType.SQLITE:
+            return
+
+        migrations: list[tuple[str, str, str]] = [
+            ("bets", "close_price", "ALTER TABLE bets ADD COLUMN close_price REAL"),
+            ("bets", "clv_percent", "ALTER TABLE bets ADD COLUMN clv_percent REAL"),
+            ("bets", "close_recorded_at", "ALTER TABLE bets ADD COLUMN close_recorded_at DATETIME"),
+        ]
+
+        async with self._engine.begin() as conn:
+            for table, column, ddl in migrations:
+                info = await conn.execute(text(f"PRAGMA table_info({table})"))
+                existing = {row[1] for row in info.fetchall()}
+                if column not in existing:
+                    await conn.execute(text(ddl))
+                    logger.info("Applied migration", table=table, column=column)
 
     @asynccontextmanager
     async def session(self) -> AsyncGenerator[AsyncSession, None]:

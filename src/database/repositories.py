@@ -225,6 +225,48 @@ class BetRepository:
         result = await self.session.execute(query.order_by(BetRecord.placed_at.desc()))
         return list(result.scalars().all())
 
+    async def record_closing_price(
+        self,
+        bet_id: int,
+        close_price: float,
+        clv_percent: float,
+        close_recorded_at: datetime,
+    ) -> None:
+        """Persist the closing line price and CLV % for a settled bet."""
+        await self.session.execute(
+            update(BetRecord)
+            .where(BetRecord.id == bet_id)
+            .values(
+                close_price=close_price,
+                clv_percent=clv_percent,
+                close_recorded_at=close_recorded_at,
+            )
+        )
+
+    async def get_settled_without_clv(
+        self,
+        limit: int = 100,
+        max_age_days: int = 7,
+    ) -> list[BetRecord]:
+        """
+        Get settled bets that don't yet have a closing-line snapshot.
+
+        max_age_days bounds how far back we'll keep retrying — Betfair
+        eventually purges market data, so older bets are effectively
+        unrecoverable and we don't want them clogging the queue.
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+        result = await self.session.execute(
+            select(BetRecord)
+            .where(BetRecord.status == BetStatus.SETTLED.value)
+            .where(BetRecord.close_recorded_at.is_(None))
+            .where(BetRecord.settled_at >= cutoff)
+            .where(BetRecord.result.in_([BetResult.WON.value, BetResult.LOST.value]))
+            .order_by(BetRecord.settled_at.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
     async def get_settled_between(
         self,
         start_date: date,

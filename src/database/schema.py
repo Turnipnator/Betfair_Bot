@@ -91,6 +91,13 @@ class BetRecord(Base):
     matched_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     settled_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
 
+    # Closing line value: price the market closed at on our selection, plus the
+    # implied CLV % vs our matched odds. Positive CLV = we beat the closing line
+    # (the leading indicator of real edge, independent of W/L variance).
+    close_price: Mapped[Optional[float]] = mapped_column(Float)
+    clv_percent: Mapped[Optional[float]] = mapped_column(Float)
+    close_recorded_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+
     # Relationships
     market: Mapped["MarketRecord"] = relationship(back_populates="bets")
 

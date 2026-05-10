@@ -1,5 +1,6 @@
 """Utility functions."""
 
+from src.utils.clv import compute_clv_percent
 from src.utils.odds import (
     calculate_back_profit,
     calculate_edge,
@@ -30,6 +31,8 @@ from src.utils.stakes import (
 )
 
 __all__ = [
+    # CLV
+    "compute_clv_percent",
     # Odds utilities
     "calculate_back_profit",
     "calculate_edge",

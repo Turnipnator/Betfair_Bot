@@ -1209,19 +1209,23 @@ class PaperTradingEngine:
 
     async def record_closing_lines(self) -> None:
         """
-        Snapshot the closing line price for recently-settled bets and store CLV.
+        Snapshot the last traded price for in-flight and recently-settled bets.
 
         CLV (Closing Line Value) is the % gap between our matched odds and the
         market's last traded price on our selection. Positive CLV means we beat
         the market; sustained positive CLV is the strongest leading indicator
-        of real edge — it shows up in dozens of bets rather than the hundreds
-        needed for W/L variance to reveal whether a strategy works.
+        of real edge — visible in dozens of bets rather than the hundreds W/L
+        variance needs to reveal whether a strategy works.
 
-        Capture strategy: query SETTLED bets with no close snapshot yet, batch
-        their market_ids (Betfair caps list_market_book at 10/call), pull the
-        post-settlement last_price_traded for each runner, compute CLV, persist.
-        Bets older than 7 days are dropped from the queue — Betfair purges old
-        market state, so they're unrecoverable.
+        We capture continuously while a bet is open: Betfair purges markets
+        from list_market_book shortly after they close, so by the time a bet
+        settles the market may already be unqueryable. By snapshotting every
+        cycle on open bets, the final successful update before settlement
+        becomes our "close". For settled bets without a snapshot, we still
+        attempt one — sometimes Betfair's price is queryable for an hour or
+        two post-close.
+
+        Bets older than 7 days are dropped from the queue.
         """
         if not betfair_client.is_logged_in:
             return
@@ -1229,32 +1233,32 @@ class PaperTradingEngine:
         try:
             async with db.session() as session:
                 bet_repo = BetRepository(session)
-                pending = await bet_repo.get_settled_without_clv(limit=100)
+                pending = await bet_repo.get_bets_for_clv_capture(limit=200)
 
             if not pending:
                 return
 
-            # Unique market_ids, capped — we'll catch the rest on next tick
             market_ids = list({b.market_id for b in pending})
-
             markets = await betfair_client.get_market_prices(market_ids)
-            if not markets:
-                logger.debug("CLV capture: no markets returned", requested=len(market_ids))
-                return
 
-            recorded = 0
+            no_market = 0
+            no_ltp = 0
+            updated = 0
+            first_captures = 0
             now = datetime.now(timezone.utc)
 
             async with db.session() as session:
                 bet_repo = BetRepository(session)
 
                 for bet in pending:
-                    market = markets.get(bet.market_id)
+                    market = markets.get(bet.market_id) if markets else None
                     if not market:
+                        no_market += 1
                         continue
 
                     runner = market.get_runner(bet.selection_id)
                     if runner is None or runner.last_price_traded is None:
+                        no_ltp += 1
                         continue
 
                     clv = compute_clv_percent(
@@ -1265,28 +1269,42 @@ class PaperTradingEngine:
                     if clv is None:
                         continue
 
+                    is_first = bet.close_recorded_at is None
                     await bet_repo.record_closing_price(
                         bet_id=bet.id,
                         close_price=runner.last_price_traded,
                         clv_percent=clv,
                         close_recorded_at=now,
                     )
-                    recorded += 1
+                    updated += 1
 
-                    logger.info(
-                        "CLV recorded",
-                        bet_id=bet.id,
-                        strategy=bet.strategy,
-                        bet_type=bet.bet_type,
-                        matched_odds=bet.matched_odds,
-                        close_price=runner.last_price_traded,
-                        clv_pct=f"{clv:+.2f}%",
-                    )
+                    # Log only the first capture per bet at info level —
+                    # subsequent refreshes are routine and would spam logs.
+                    if is_first:
+                        first_captures += 1
+                        logger.info(
+                            "CLV first capture",
+                            bet_id=bet.id,
+                            strategy=bet.strategy,
+                            bet_type=bet.bet_type,
+                            matched_odds=bet.matched_odds,
+                            close_price=runner.last_price_traded,
+                            clv_pct=f"{clv:+.2f}%",
+                            bet_status=bet.status,
+                        )
 
                 await session.commit()
 
-            if recorded > 0:
-                logger.info("CLV capture cycle complete", recorded=recorded, queued=len(pending))
+            logger.info(
+                "CLV capture cycle",
+                queued=len(pending),
+                markets_requested=len(market_ids),
+                markets_returned=len(markets) if markets else 0,
+                updated=updated,
+                first_captures=first_captures,
+                no_market=no_market,
+                no_ltp=no_ltp,
+            )
 
         except Exception as e:
             logger.warning("Error recording closing lines", error=str(e)[:200])

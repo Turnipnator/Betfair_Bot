@@ -7,7 +7,7 @@ Provides clean interfaces for interacting with database tables.
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.logging_config import get_logger
@@ -243,26 +243,43 @@ class BetRepository:
             )
         )
 
-    async def get_settled_without_clv(
+    async def get_bets_for_clv_capture(
         self,
-        limit: int = 100,
+        limit: int = 200,
         max_age_days: int = 7,
     ) -> list[BetRecord]:
         """
-        Get settled bets that don't yet have a closing-line snapshot.
+        Get bets that should have their closing line refreshed this cycle.
 
-        max_age_days bounds how far back we'll keep retrying — Betfair
-        eventually purges market data, so older bets are effectively
-        unrecoverable and we don't want them clogging the queue.
+        We can't wait until settlement to snapshot price — Betfair drops
+        markets from list_market_book shortly after they close. So:
+
+          - OPEN bets (MATCHED): refresh every cycle so the last successful
+            snapshot before settlement becomes our "close" price.
+          - SETTLED bets: only if we never captured one (close_recorded_at
+            IS NULL). If their market is already gone, the next cycle will
+            silently skip; after max_age_days we drop them from the queue.
+
+        Voided bets are excluded — CLV is meaningless for them.
         """
         cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
         result = await self.session.execute(
             select(BetRecord)
-            .where(BetRecord.status == BetStatus.SETTLED.value)
-            .where(BetRecord.close_recorded_at.is_(None))
-            .where(BetRecord.settled_at >= cutoff)
-            .where(BetRecord.result.in_([BetResult.WON.value, BetResult.LOST.value]))
-            .order_by(BetRecord.settled_at.desc())
+            .where(BetRecord.placed_at >= cutoff)
+            .where(
+                or_(
+                    BetRecord.status == BetStatus.MATCHED.value,
+                    (BetRecord.status == BetStatus.SETTLED.value)
+                    & BetRecord.close_recorded_at.is_(None),
+                )
+            )
+            .where(
+                or_(
+                    BetRecord.result.is_(None),
+                    BetRecord.result.in_([BetResult.WON.value, BetResult.LOST.value]),
+                )
+            )
+            .order_by(BetRecord.placed_at.desc())
             .limit(limit)
         )
         return list(result.scalars().all())

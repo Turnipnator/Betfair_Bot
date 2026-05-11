@@ -599,10 +599,10 @@ class PaperTradingEngine:
             if date.today() != self._current_date:
                 await self.daily_reset()
 
-            # Build filter for domestic leagues (with country filter)
+            # Build filter for domestic football leagues (with country filter)
             domestic_filter = MarketFilter(
-                sports=[Sport.HORSE_RACING, Sport.FOOTBALL],
-                market_types=["WIN", "MATCH_ODDS"],
+                sports=[Sport.FOOTBALL],
+                market_types=["MATCH_ODDS"],
                 countries=[
                     "GB",  # England & Scotland
                     "ES",  # Spain (La Liga, Segunda)
@@ -615,6 +615,17 @@ class PaperTradingEngine:
                 ],
                 from_hours=0.5,  # Starting in 30 mins
                 to_hours=12,  # Up to 12 hours ahead
+                max_results=100,
+            )
+
+            # Horse racing has different cadence: markets created ~1h before
+            # race, only GB/IE relevant for Nags integration.
+            horse_racing_filter = MarketFilter(
+                sports=[Sport.HORSE_RACING],
+                market_types=["WIN"],
+                countries=["GB", "IE"],
+                from_hours=0.0,
+                to_hours=2.0,
                 max_results=100,
             )
 
@@ -646,6 +657,22 @@ class PaperTradingEngine:
                             # Avoid duplicates (some matches might appear in both)
                             if m.market_id not in [x.market_id for x in markets]:
                                 markets.append(m)
+
+                # Get horse racing markets (GB/IE, next 2h)
+                horse_racing_markets = await betfair_client.get_markets(
+                    horse_racing_filter
+                )
+                if horse_racing_markets:
+                    existing_ids = {m.market_id for m in markets}
+                    new_hr = [
+                        m for m in horse_racing_markets if m.market_id not in existing_ids
+                    ]
+                    markets.extend(new_hr)
+                    logger.info(
+                        "Horse racing markets fetched",
+                        count=len(new_hr),
+                        sample=[m.event_name for m in new_hr[:3]],
+                    )
 
                 # Get prices for all markets
                 if markets:

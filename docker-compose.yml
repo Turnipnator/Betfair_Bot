@@ -13,6 +13,10 @@ services:
       - ./data:/app/data
       # SSL certificates (read-only for security)
       - ./certs:/app/certs:ro
+      # Nags horse racing bot's SQLite (read-only) — VPS-only path.
+      # Whole directory mounted because SQLite WAL mode requires
+      # .db-shm and .db-wal files alongside racing.db.
+      - /root/horse-racing-bot/data:/app/nags-data:ro
     logging:
       driver: "json-file"
       options:

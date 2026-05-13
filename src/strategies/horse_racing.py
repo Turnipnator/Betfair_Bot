@@ -75,7 +75,13 @@ class NagsPick:
 
 
 class NagsReader:
-    """Loads today's Nags picks from the shared SQLite file."""
+    """Loads today's Nags picks from the shared SQLite file.
+
+    Nags writes selections with ``meeting_id=NULL`` and packs the course
+    name into ``race_name`` as ``"<Course> - <Race>"``. We don't JOIN
+    against ``meetings``; we just filter by ``date(created_at)`` and
+    parse the course back out of ``race_name``.
+    """
 
     def __init__(self, db_path: Path = NAGS_DB_PATH) -> None:
         self._db_path = db_path
@@ -86,7 +92,6 @@ class NagsReader:
             logger.debug("Nags DB not found, skipping", path=str(self._db_path))
             return []
 
-        today_iso = date.today().isoformat()
         try:
             # Read-only connection. uri=True needed for the ?mode=ro flag.
             uri = f"file:{self._db_path}?mode=ro"
@@ -94,29 +99,49 @@ class NagsReader:
                 conn.row_factory = sqlite3.Row
                 rows = conn.execute(
                     """
-                    SELECT m.course, s.race_time, s.horse, s.selection_type,
-                           s.odds_guide, s.score
-                    FROM selections s
-                    JOIN meetings m ON s.meeting_id = m.id
-                    WHERE m.date = ?
-                    """,
-                    (today_iso,),
+                    SELECT race_time, race_name, horse, selection_type,
+                           odds_guide, score
+                    FROM selections
+                    WHERE date(created_at) = date('now')
+                    """
                 ).fetchall()
         except sqlite3.Error as e:
             logger.warning("Failed to read Nags DB", error=str(e))
             return []
 
-        return [
-            NagsPick(
-                course=row["course"],
-                race_time=row["race_time"],
-                horse=row["horse"],
-                selection_type=row["selection_type"],
-                odds_guide=row["odds_guide"],
-                score=row["score"],
+        picks: list[NagsPick] = []
+        for row in rows:
+            course = _course_from_race_name(row["race_name"])
+            if not course:
+                # No "Course - " prefix, can't safely match to Betfair.
+                logger.debug(
+                    "Skipping Nags pick with unparseable race_name",
+                    race_name=row["race_name"],
+                    horse=row["horse"],
+                )
+                continue
+            picks.append(
+                NagsPick(
+                    course=course,
+                    race_time=row["race_time"],
+                    horse=row["horse"],
+                    selection_type=row["selection_type"],
+                    odds_guide=row["odds_guide"],
+                    score=row["score"],
+                )
             )
-            for row in rows
-        ]
+        return picks
+
+
+def _course_from_race_name(race_name: Optional[str]) -> Optional[str]:
+    """Extract the course from Nags' ``"Course - Race"`` race_name."""
+    if not race_name:
+        return None
+    head, sep, _ = race_name.partition(" - ")
+    if not sep:
+        return None
+    course = head.strip()
+    return course or None
 
 
 class _NagsDailyTracker:

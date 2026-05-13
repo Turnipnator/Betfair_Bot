@@ -22,6 +22,10 @@ from src.strategies.arbitrage import (
     ArbitrageStrategy,
     ScalpingStrategy,
 )
+from src.strategies.horse_racing import (
+    NagsBackStrategy,
+    NagsLayFavStrategy,
+)
 
 __all__ = [
     # Base
@@ -43,4 +47,7 @@ __all__ = [
     "ArbType",
     "ArbitrageStrategy",
     "ScalpingStrategy",
+    # Horse racing (Nags)
+    "NagsBackStrategy",
+    "NagsLayFavStrategy",
 ]

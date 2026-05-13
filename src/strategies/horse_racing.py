@@ -1,0 +1,469 @@
+"""
+Horse racing strategies that consume Nags daily picks.
+
+Two strategies share a Nags SQLite reader and a combined daily cap:
+
+* ``NagsBackStrategy`` (``nags_back``) — back Nags' daily picks
+  (NAP / Next Best / per-race selection) on Betfair Exchange. Exchange
+  prices are typically a few percent better than Bet365 even after the
+  5% commission, so re-using Paul's existing pick stream is free alpha.
+
+* ``NagsLayFavStrategy`` (``nags_lay_fav``) — B1a refinement: lay the
+  Betfair favourite when Nags has picked a *different* horse in that
+  race. Why the 2.0 floor? Nags' own rules block any pick at evens or
+  shorter (the "sub-evens block"), so without the floor we'd lay every
+  sub-evens favourite by default and that's a false signal. The 4.0
+  ceiling caps liability and keeps us out of races where the
+  "favourite" is barely the favourite.
+
+Reads ``/app/nags-data/racing.db`` (the Nags container's SQLite
+mounted read-only into the Betfair bot — see docker-compose.yml).
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import sqlite3
+from dataclasses import dataclass
+from datetime import date
+from pathlib import Path
+from typing import Optional
+
+from config.logging_config import get_logger
+from src.models import Bet, BetSignal, BetType, Market, Runner, Sport
+from src.strategies.base import BaseStrategy
+
+logger = get_logger(__name__)
+
+
+# Nags DB path inside the Betfair container. Mounted read-only from
+# /root/horse-racing-bot/data on the VPS (see docker-compose.yml).
+# Override via env var for local development.
+NAGS_DB_PATH = Path(os.environ.get("NAGS_DB_PATH", "/app/nags-data/racing.db"))
+
+# Shared risk caps for both Nags strategies.
+DAILY_HORSE_RACING_BET_CAP = 6  # combined nags_back + nags_lay_fav
+BACK_FLAT_STAKE = 10.0
+LAY_LIABILITY_CAP = 10.0
+MIN_SECONDS_TO_OFF = 300  # don't bet inside the last 5 minutes
+
+# nags_lay_fav (B1a) filters.
+LAY_FAV_MIN_ODDS = 2.0
+LAY_FAV_MAX_ODDS = 4.0
+# Skip races where Nags' only pick is `race_nb` — those are
+# lower-confidence backup picks and shouldn't drive a lay signal.
+EXCLUDE_RACE_NB_ONLY = True
+
+# Selection types Nags writes into its `selections.selection_type` column.
+SELECTION_TYPE_NAP = "nap"
+SELECTION_TYPE_NEXT_BEST = "next_best"
+SELECTION_TYPE_SELECTION = "selection"
+SELECTION_TYPE_RACE_NB = "race_nb"
+
+
+@dataclass(frozen=True)
+class NagsPick:
+    """One Nags selection enriched with course/race-time for matching."""
+
+    course: str
+    race_time: str  # "HH:MM" local UK time as written by Nags
+    horse: str
+    selection_type: str
+    odds_guide: Optional[str]
+    score: Optional[float]
+
+
+class NagsReader:
+    """Loads today's Nags picks from the shared SQLite file."""
+
+    def __init__(self, db_path: Path = NAGS_DB_PATH) -> None:
+        self._db_path = db_path
+
+    def load_today(self) -> list[NagsPick]:
+        """Return all of today's Nags picks. Empty list if DB missing."""
+        if not self._db_path.exists():
+            logger.debug("Nags DB not found, skipping", path=str(self._db_path))
+            return []
+
+        today_iso = date.today().isoformat()
+        try:
+            # Read-only connection. uri=True needed for the ?mode=ro flag.
+            uri = f"file:{self._db_path}?mode=ro"
+            with sqlite3.connect(uri, uri=True) as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    """
+                    SELECT m.course, s.race_time, s.horse, s.selection_type,
+                           s.odds_guide, s.score
+                    FROM selections s
+                    JOIN meetings m ON s.meeting_id = m.id
+                    WHERE m.date = ?
+                    """,
+                    (today_iso,),
+                ).fetchall()
+        except sqlite3.Error as e:
+            logger.warning("Failed to read Nags DB", error=str(e))
+            return []
+
+        return [
+            NagsPick(
+                course=row["course"],
+                race_time=row["race_time"],
+                horse=row["horse"],
+                selection_type=row["selection_type"],
+                odds_guide=row["odds_guide"],
+                score=row["score"],
+            )
+            for row in rows
+        ]
+
+
+class _NagsDailyTracker:
+    """In-memory daily cap shared across both Nags strategies."""
+
+    def __init__(self) -> None:
+        self._date = date.today()
+        self._bets_today = 0
+        self._markets_bet: set[str] = set()
+
+    def _maybe_reset(self) -> None:
+        today = date.today()
+        if self._date != today:
+            self._date = today
+            self._bets_today = 0
+            self._markets_bet.clear()
+            logger.info("Nags daily counters reset")
+
+    def can_bet(self, market_id: str) -> bool:
+        self._maybe_reset()
+        if self._bets_today >= DAILY_HORSE_RACING_BET_CAP:
+            return False
+        if market_id in self._markets_bet:
+            return False
+        return True
+
+    def record_bet(self, market_id: str) -> None:
+        self._maybe_reset()
+        self._bets_today += 1
+        self._markets_bet.add(market_id)
+        logger.info(
+            "Nags bet recorded",
+            bets_today=self._bets_today,
+            cap=DAILY_HORSE_RACING_BET_CAP,
+        )
+
+
+# Module-level singleton — both strategies share the same cap.
+_tracker = _NagsDailyTracker()
+
+
+# Course name normalisation: Betfair uses "Newcastle (AW)" etc.,
+# while Nags writes a plain "Newcastle". Strip trailing parentheticals
+# and lowercase before comparing.
+_PAREN_TAG_RE = re.compile(r"\s*\([^)]*\)\s*$")
+
+
+def _normalise_course(name: str) -> str:
+    return _PAREN_TAG_RE.sub("", name).strip().lower()
+
+
+# Betfair event_name for HR WIN markets is typically
+# "<Course> <HH:MM> <distance> ..." (e.g. "Newcastle 13:50 1m4f Hcap").
+# We pull the first HH:MM substring we see anywhere in the string —
+# market_name fallback is checked too in case event_name lacks it.
+_TIME_ANYWHERE_RE = re.compile(r"\b(\d{1,2}:\d{2})\b")
+
+
+def _parse_race_time(market: Market) -> Optional[str]:
+    for text in (market.event_name, market.market_name):
+        if not text:
+            continue
+        m = _TIME_ANYWHERE_RE.search(text)
+        if m:
+            hh, mm = m.group(1).split(":")
+            return f"{int(hh):02d}:{mm}"
+    return None
+
+
+def _normalise_horse_name(name: str) -> str:
+    """Strip punctuation and lowercase for fuzzy horse-name matching."""
+    return re.sub(r"[^a-z0-9 ]+", "", name.lower()).strip()
+
+
+def _index_picks_by_race(
+    picks: list[NagsPick],
+) -> dict[tuple[str, str], list[NagsPick]]:
+    """Group picks by (normalised course, HH:MM)."""
+    out: dict[tuple[str, str], list[NagsPick]] = {}
+    for p in picks:
+        key = (_normalise_course(p.course), p.race_time)
+        out.setdefault(key, []).append(p)
+    return out
+
+
+def _picks_for_market(
+    market: Market,
+    picks_by_race: dict[tuple[str, str], list[NagsPick]],
+) -> list[NagsPick]:
+    if not market.venue:
+        return []
+    race_time = _parse_race_time(market)
+    if not race_time:
+        return []
+    return picks_by_race.get((_normalise_course(market.venue), race_time), [])
+
+
+def _match_runner_to_pick(
+    market: Market, pick: NagsPick
+) -> Optional[Runner]:
+    """Match a Nags pick to a Betfair runner with apostrophe tolerance."""
+    runner = market.get_runner_by_name(pick.horse)
+    if runner is not None:
+        return runner
+    # Fallback: normalise both sides (strips apostrophes, hyphens, etc.).
+    target = _normalise_horse_name(pick.horse)
+    if not target:
+        return None
+    for r in market.runners:
+        if _normalise_horse_name(r.name) == target:
+            return r
+    return None
+
+
+def _parse_odds_guide(odds_guide: Optional[str]) -> Optional[float]:
+    """Best-effort parse of Nags' free-text odds guide to decimal.
+
+    Handles "5/2", "11/4", "Evens", "2.5", "9-2". Returns None on
+    anything weird — we only use this for the B1a longer-than-fav
+    check, so falling back to runner price is fine.
+    """
+    if not odds_guide:
+        return None
+    s = odds_guide.strip().lower()
+    if s in ("evens", "evs", "even"):
+        return 2.0
+    # Decimal form like "2.5" or "3.0".
+    try:
+        return float(s)
+    except ValueError:
+        pass
+    # Fractional "a/b" or "a-b".
+    m = re.match(r"^(\d+)\s*[/\-]\s*(\d+)$", s)
+    if m:
+        num, den = int(m.group(1)), int(m.group(2))
+        if den > 0:
+            return 1.0 + num / den
+    return None
+
+
+class _NagsStrategyBase(BaseStrategy):
+    """Shared scaffolding: HR-only, pre-play, daily cap, off-time cutoff."""
+
+    supported_sports: list[Sport] = [Sport.HORSE_RACING]
+    requires_inplay: bool = False
+
+    def __init__(self, reader: Optional[NagsReader] = None) -> None:
+        super().__init__()
+        self._reader = reader or NagsReader()
+        # Cache today's picks for the duration of a scan tick. We
+        # refresh whenever the cached date drifts from today, which
+        # also handles the bot running past midnight.
+        self._picks_cache: list[NagsPick] = []
+        self._picks_cache_date: Optional[date] = None
+
+    def _todays_picks(self) -> list[NagsPick]:
+        today = date.today()
+        if self._picks_cache_date != today:
+            self._picks_cache = self._reader.load_today()
+            self._picks_cache_date = today
+            logger.info(
+                "Loaded Nags picks for today",
+                count=len(self._picks_cache),
+                date=today.isoformat(),
+            )
+        return self._picks_cache
+
+    def pre_evaluate(self, market: Market) -> bool:
+        if not super().pre_evaluate(market):
+            return False
+        # Off-time cutoff — 5 minutes is enough margin to clear the
+        # 60s pre-close lockout and avoid late price thrash.
+        if market.seconds_to_start < MIN_SECONDS_TO_OFF:
+            return False
+        if not _tracker.can_bet(market.market_id):
+            return False
+        return True
+
+    def manage_position(
+        self, market: Market, open_bet: Bet
+    ) -> Optional[BetSignal]:
+        """Nags strategies hold to settlement; no in-play management."""
+        return None
+
+    def record_bet_placed(self) -> None:
+        """No-op — the tracker is updated inside evaluate() when a
+        signal is generated. Over-counting on the rare reject path is
+        the safer side to err on for a 6/day cap."""
+        return None
+
+
+class NagsBackStrategy(_NagsStrategyBase):
+    """Back Nags' daily picks on Betfair Exchange."""
+
+    name: str = "nags_back"
+
+    async def evaluate(self, market: Market) -> Optional[BetSignal]:
+        if not self.pre_evaluate(market):
+            return None
+
+        picks = _picks_for_market(market, _index_picks_by_race(self._todays_picks()))
+        if not picks:
+            return None
+
+        # Prefer NAP > next_best > selection > race_nb.
+        priority = {
+            SELECTION_TYPE_NAP: 0,
+            SELECTION_TYPE_NEXT_BEST: 1,
+            SELECTION_TYPE_SELECTION: 2,
+            SELECTION_TYPE_RACE_NB: 3,
+        }
+        picks_sorted = sorted(
+            picks, key=lambda p: priority.get(p.selection_type, 99)
+        )
+
+        for pick in picks_sorted:
+            runner = _match_runner_to_pick(market, pick)
+            if runner is None:
+                logger.debug(
+                    "Nags pick not found in runners",
+                    horse=pick.horse,
+                    market=market.market_name,
+                )
+                continue
+            if runner.status != "ACTIVE":
+                continue
+            if not runner.best_back_price:
+                continue
+
+            odds = runner.best_back_price
+            _tracker.record_bet(market.market_id)
+            return BetSignal(
+                market_id=market.market_id,
+                selection_id=runner.selection_id,
+                selection_name=runner.name,
+                bet_type=BetType.BACK,
+                odds=odds,
+                stake=BACK_FLAT_STAKE,
+                strategy=self.name,
+                sport=Sport.HORSE_RACING,
+                market_name=market.market_name,
+                event_name=market.event_name,
+                reason=(
+                    f"Nags {pick.selection_type} (score "
+                    f"{pick.score:.1f})" if pick.score is not None
+                    else f"Nags {pick.selection_type}"
+                ),
+                market_start_time=market.start_time,
+            )
+        return None
+
+
+class NagsLayFavStrategy(_NagsStrategyBase):
+    """Lay the favourite when Nags backs a different (longer) horse.
+
+    B1a — only fires when:
+      * favourite back price is in ``[LAY_FAV_MIN_ODDS, LAY_FAV_MAX_ODDS]``
+      * Nags has at least one pick in this race
+      * Nags' pick is NOT the favourite
+      * Nags' pick is at longer odds than the favourite
+      * (optional) Nags has a pick other than ``race_nb``
+    """
+
+    name: str = "nags_lay_fav"
+
+    async def evaluate(self, market: Market) -> Optional[BetSignal]:
+        if not self.pre_evaluate(market):
+            return None
+
+        favourite = market.get_favourite()
+        if favourite is None or favourite.best_back_price is None:
+            return None
+
+        fav_price = favourite.best_back_price
+        if not (LAY_FAV_MIN_ODDS <= fav_price <= LAY_FAV_MAX_ODDS):
+            return None
+
+        picks = _picks_for_market(
+            market, _index_picks_by_race(self._todays_picks())
+        )
+        if not picks:
+            return None
+
+        if EXCLUDE_RACE_NB_ONLY and all(
+            p.selection_type == SELECTION_TYPE_RACE_NB for p in picks
+        ):
+            return None
+
+        # The pick we care about is the highest-priority non-race_nb
+        # one (NAP > NB > selection). If we got here, at least one
+        # exists (the EXCLUDE_RACE_NB_ONLY guard above filtered out
+        # the all-race_nb case).
+        priority = {
+            SELECTION_TYPE_NAP: 0,
+            SELECTION_TYPE_NEXT_BEST: 1,
+            SELECTION_TYPE_SELECTION: 2,
+            SELECTION_TYPE_RACE_NB: 3,
+        }
+        ranked = sorted(picks, key=lambda p: priority.get(p.selection_type, 99))
+        primary = ranked[0]
+
+        pick_runner = _match_runner_to_pick(market, primary)
+        if pick_runner is None:
+            logger.debug(
+                "Nags pick not in runners, can't compare to fav",
+                horse=primary.horse,
+                market=market.market_name,
+            )
+            return None
+
+        # Nags picked the favourite — no disagreement, no edge.
+        if pick_runner.selection_id == favourite.selection_id:
+            return None
+
+        # Confirm Nags' horse is at longer odds than the fav. Prefer
+        # live exchange price; fall back to the odds_guide string only
+        # if exchange has nothing.
+        pick_price = pick_runner.best_back_price or _parse_odds_guide(
+            primary.odds_guide
+        )
+        if pick_price is None or pick_price <= fav_price:
+            return None
+
+        # Stake sizing: liability is stake * (odds - 1). Cap at £10.
+        lay_price = favourite.best_lay_price or fav_price
+        liability_per_unit = lay_price - 1.0
+        if liability_per_unit <= 0:
+            return None
+        stake = round(LAY_LIABILITY_CAP / liability_per_unit, 2)
+        if stake < 2.0:  # Betfair £2 minimum
+            return None
+
+        _tracker.record_bet(market.market_id)
+        return BetSignal(
+            market_id=market.market_id,
+            selection_id=favourite.selection_id,
+            selection_name=favourite.name,
+            bet_type=BetType.LAY,
+            odds=lay_price,
+            stake=stake,
+            strategy=self.name,
+            sport=Sport.HORSE_RACING,
+            market_name=market.market_name,
+            event_name=market.event_name,
+            reason=(
+                f"Nags backs {primary.horse} ({primary.selection_type}) "
+                f"@~{pick_price:.2f}; laying fav @{lay_price:.2f}"
+            ),
+            market_start_time=market.start_time,
+        )

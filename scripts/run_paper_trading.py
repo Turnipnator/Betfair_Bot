@@ -32,6 +32,8 @@ from src.strategies import (
     LayTheDrawStrategy,
     LayTheServerStrategy,
     ArbitrageStrategy,
+    NagsBackStrategy,
+    NagsLayFavStrategy,
 )
 from src.telegram_bot import telegram_bot, notifier
 from src.reporting import report_generator, daily_report_generator
@@ -229,6 +231,8 @@ class PaperTradingEngine:
             "lay_the_draw": LayTheDrawStrategy,
             "lay_the_server": LayTheServerStrategy,
             "arbitrage": ArbitrageStrategy,
+            "nags_back": NagsBackStrategy,
+            "nags_lay_fav": NagsLayFavStrategy,
         }
 
         self._strategies = []

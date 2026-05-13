@@ -263,20 +263,28 @@ class _NagsStrategyBase(BaseStrategy):
     supported_sports: list[Sport] = [Sport.HORSE_RACING]
     requires_inplay: bool = False
 
+    # Re-read Nags DB at most this often. Short enough that picks
+    # written mid-day by the Nags bot appear within a couple of
+    # scan cycles; long enough that we're not hammering SQLite for
+    # every runner of every horse racing market.
+    _PICKS_TTL_SECONDS = 120.0
+
     def __init__(self, reader: Optional[NagsReader] = None) -> None:
         super().__init__()
         self._reader = reader or NagsReader()
-        # Cache today's picks for the duration of a scan tick. We
-        # refresh whenever the cached date drifts from today, which
-        # also handles the bot running past midnight.
         self._picks_cache: list[NagsPick] = []
         self._picks_cache_date: Optional[date] = None
+        self._picks_cache_loaded_at: float = 0.0
 
     def _todays_picks(self) -> list[NagsPick]:
+        import time
         today = date.today()
-        if self._picks_cache_date != today:
+        now = time.monotonic()
+        stale = (now - self._picks_cache_loaded_at) >= self._PICKS_TTL_SECONDS
+        if self._picks_cache_date != today or stale:
             self._picks_cache = self._reader.load_today()
             self._picks_cache_date = today
+            self._picks_cache_loaded_at = now
             logger.info(
                 "Loaded Nags picks for today",
                 count=len(self._picks_cache),

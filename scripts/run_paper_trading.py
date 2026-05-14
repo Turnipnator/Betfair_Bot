@@ -192,6 +192,7 @@ class PaperTradingEngine:
             count=len(self._strategies),
             names=[s.name for s in self._strategies],
         )
+        telegram_bot.set_strategies(self._strategies)
 
         # Initialize Betfair client (login may have happened earlier for LIVE mode bankroll)
         if settings.betfair.is_configured():

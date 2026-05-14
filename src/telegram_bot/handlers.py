@@ -213,36 +213,44 @@ async def handle_start_trading(
 
 
 async def handle_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /toggle <strategy> command."""
+    """Handle /toggle <strategy> command — flips a strategy on/off live."""
     if not _is_authorized(update):
         await _unauthorized(update)
         return
 
+    from src.telegram_bot import telegram_bot
+    strategies = telegram_bot.get_strategies()
+    by_name = {s.name: s for s in strategies}
+
+    def _status_line(s) -> str:
+        return f"{s.name}: {'enabled' if s.is_enabled else 'disabled'}"
+
     if not context.args:
-        enabled = settings.strategy.get_enabled_list()
+        if not by_name:
+            await update.message.reply_text("No strategies loaded.")
+            return
+        lines = [_status_line(s) for s in strategies]
         await update.message.reply_text(
-            f"Usage: /toggle <strategy>\n\n"
-            f"Currently enabled: {', '.join(enabled) or 'None'}\n\n"
-            f"Available: value_betting, lay_the_draw, arbitrage, scalping"
+            "Usage: /toggle <strategy>\n\n"
+            "Currently loaded:\n" + "\n".join(lines)
         )
         return
 
-    strategy = context.args[0].lower()
-    valid_strategies = ["value_betting", "lay_the_draw", "arbitrage", "scalping"]
-
-    if strategy not in valid_strategies:
+    name = context.args[0].lower()
+    if name not in by_name:
         await update.message.reply_text(
-            f"Unknown strategy: {strategy}\n"
-            f"Valid options: {', '.join(valid_strategies)}"
+            f"Unknown strategy: {name}\n"
+            f"Valid options: {', '.join(sorted(by_name)) or 'none'}"
         )
         return
 
-    # Note: Actually toggling would require updating env/config at runtime
-    # For now, just acknowledge the request
-    await update.message.reply_text(
-        f"Strategy toggle for '{strategy}' noted.\n"
-        f"Note: Runtime strategy toggling requires restart to take effect."
-    )
+    s = by_name[name]
+    if s.is_enabled:
+        s.disable()
+        await update.message.reply_text(f"Disabled '{name}'. No new bets will fire.")
+    else:
+        s.enable()
+        await update.message.reply_text(f"Enabled '{name}'.")
 
 
 async def handle_positions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

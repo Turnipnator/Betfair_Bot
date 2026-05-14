@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from config.logging_config import get_logger
 from src.models import Bet, BetSignal, BetType, Market, Runner, Sport
@@ -193,14 +194,23 @@ def _normalise_course(name: str) -> str:
     return _PAREN_TAG_RE.sub("", name).strip().lower()
 
 
-# Betfair event_name for HR WIN markets is typically
-# "<Course> <HH:MM> <distance> ..." (e.g. "Newcastle 13:50 1m4f Hcap").
-# We pull the first HH:MM substring we see anywhere in the string —
-# market_name fallback is checked too in case event_name lacks it.
+# Nags writes race_time as UK local "HH:MM" (BST in summer, GMT in winter),
+# so we need to convert Betfair's UTC start_time to Europe/London before
+# comparing.
+_UK_TZ = ZoneInfo("Europe/London")
+
+# Fallback regex for the rare case where market.start_time is missing.
+# Real Betfair markets don't include the off-time in event_name/market_name
+# (event_name is just "York 14th May", market_name "1m Hcap") — start_time
+# is the authoritative source.
 _TIME_ANYWHERE_RE = re.compile(r"\b(\d{1,2}:\d{2})\b")
 
 
 def _parse_race_time(market: Market) -> Optional[str]:
+    """Return scheduled off-time as 'HH:MM' UK local — to match Nags."""
+    if market.start_time is not None:
+        local = market.start_time.astimezone(_UK_TZ)
+        return f"{local.hour:02d}:{local.minute:02d}"
     for text in (market.event_name, market.market_name):
         if not text:
             continue

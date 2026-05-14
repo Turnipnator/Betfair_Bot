@@ -41,9 +41,21 @@ class TradingBot:
         # Reference to simulator for querying positions
         self._simulator = None
 
+        # Live strategy instances — set by the trading engine on startup
+        # so /toggle can flip their _enabled flag at runtime.
+        self._strategies: list = []
+
     def set_simulator(self, simulator) -> None:
         """Set reference to paper trading simulator."""
         self._simulator = simulator
+
+    def set_strategies(self, strategies: list) -> None:
+        """Set live strategy instances so /toggle can mutate them."""
+        self._strategies = strategies
+
+    def get_strategies(self) -> list:
+        """Return live strategy instances."""
+        return self._strategies
 
     @property
     def is_running(self) -> bool:

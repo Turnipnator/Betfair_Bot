@@ -35,6 +35,7 @@ from src.strategies import (
     NagsBackStrategy,
     NagsLayFavStrategy,
 )
+from src.strategies.horse_racing import FORCE_PAPER_STRATEGIES
 from src.telegram_bot import telegram_bot, notifier
 from src.reporting import report_generator, daily_report_generator
 from src.utils import calculate_stake, calculate_kelly_stake, compute_clv_percent
@@ -1602,8 +1603,13 @@ class PaperTradingEngine:
                     # Fall back to flat percentage staking
                     signal.stake = calculate_stake(self._simulator.available_balance)
 
-            # Place the bet - live or paper mode
-            if settings.is_live_mode():
+            # Place the bet - live or paper mode.
+            # Strategies in FORCE_PAPER_STRATEGIES bypass live placement
+            # even when the bot is in LIVE mode — used during the
+            # observation window for new strategies.
+            forced_paper = signal.strategy in FORCE_PAPER_STRATEGIES
+            place_live = settings.is_live_mode() and not forced_paper
+            if place_live:
                 success, message, bet = await self._place_live_bet(signal)
             else:
                 success, message, bet = self._simulator.place_order(signal)
@@ -1619,12 +1625,13 @@ class PaperTradingEngine:
                 self._bets_today += 1
 
                 logger.info(
-                    "Bet placed" if settings.is_live_mode() else "Paper bet placed",
+                    "Bet placed" if place_live else "Paper bet placed",
                     bet_id=bet.bet_ref,
                     selection=signal.selection_name,
                     odds=signal.odds,
                     stake=bet.stake,
-                    mode="LIVE" if settings.is_live_mode() else "PAPER",
+                    mode="LIVE" if place_live else "PAPER",
+                    forced_paper=forced_paper,
                 )
 
                 # Try to save to database (non-fatal if fails)

@@ -45,9 +45,17 @@ NAGS_DB_PATH = Path(os.environ.get("NAGS_DB_PATH", "/app/nags-data/racing.db"))
 
 # Shared risk caps for both Nags strategies.
 DAILY_HORSE_RACING_BET_CAP = 6  # combined nags_back + nags_lay_fav
-BACK_FLAT_STAKE = 10.0
-LAY_LIABILITY_CAP = 10.0
+BACK_FLAT_STAKE = 5.0
+LAY_LIABILITY_CAP = 5.0
 MIN_SECONDS_TO_OFF = 300  # don't bet inside the last 5 minutes
+
+# Strategies in this set are forced to paper mode even when the bot is
+# running LIVE — used during the observation window for new strategies
+# while the rest of the book (football, value, LTD, arb) trades live.
+FORCE_PAPER_STRATEGIES: frozenset[str] = frozenset({
+    "nags_back",
+    "nags_lay_fav",
+})
 
 # nags_lay_fav (B1a) filters.
 LAY_FAV_MIN_ODDS = 2.0

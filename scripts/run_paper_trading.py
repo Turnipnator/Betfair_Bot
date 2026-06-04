@@ -12,6 +12,11 @@ import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
+
+# Nags writes race times as UK local; convert bet placed_at (UTC) to match
+# when deriving the race date for result lookups.
+_UK_TZ = ZoneInfo("Europe/London")
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -136,7 +141,13 @@ class PaperTradingEngine:
         # Load open bets from database (from previous runs)
         async with db.session() as session:
             bet_repo = BetRepository(session)
-            open_bet_records = await bet_repo.get_open(is_paper=is_paper)
+            open_bet_records = list(await bet_repo.get_open(is_paper=is_paper))
+            if not is_paper:
+                # Even in live mode the Nags strategies run as forced-paper bets
+                # (FORCE_PAPER_STRATEGIES). Load those open paper bets too, or
+                # they'd never be tracked in the simulator after a restart and
+                # could never be settled by settle_horse_racing_bets().
+                open_bet_records += list(await bet_repo.get_open(is_paper=True))
             if open_bet_records:
                 # Convert BetRecord to Bet objects
                 open_bets = []
@@ -457,6 +468,15 @@ class PaperTradingEngine:
             self.settle_stale_bets,
             IntervalTrigger(minutes=10),
             id="stale_settlement",
+            replace_existing=True,
+        )
+
+        # Schedule horse-racing settlement (Racing API fallback for HR paper
+        # bets whose Betfair market was purged before manage_positions caught it)
+        self._scheduler.add_job(
+            self.settle_horse_racing_bets,
+            IntervalTrigger(minutes=10),
+            id="horse_racing_settlement",
             replace_existing=True,
         )
 
@@ -1053,6 +1073,145 @@ class PaperTradingEngine:
 
         except Exception as e:
             logger.error("Error settling stale bets", error=str(e))
+
+    async def settle_horse_racing_bets(self) -> None:
+        """Settle open horse-racing paper bets from The Racing API.
+
+        Betfair purges closed horse-racing markets from list_market_book ~1-2h
+        after the off, so manage_positions() only settles the HR bets it happens
+        to catch in that narrow window — the rest sit MATCHED forever. This is
+        the durable fallback: it looks the result up by (race date, horse name)
+        from a source that stays queryable for weeks, so it both settles fresh
+        bets and backfills ones stuck for days.
+
+        Scoped to the Nags strategies (the only horse-racing strategies, all
+        forced to paper). Football/value/LTD bets are untouched.
+        """
+        from src.data.racing_results import racing_results_service, RaceOutcome
+
+        if not self._simulator:
+            return
+
+        try:
+            open_bets = self._simulator.get_open_bets()
+            hr_bets = [b for b in open_bets if b.strategy in FORCE_PAPER_STRATEGIES]
+            if not hr_bets:
+                return
+
+            now = datetime.now(timezone.utc)
+            loop = asyncio.get_event_loop()
+            settled = voided = pending = 0
+
+            for bet in hr_bets:
+                placed = (
+                    bet.placed_at
+                    if bet.placed_at.tzinfo
+                    else bet.placed_at.replace(tzinfo=timezone.utc)
+                )
+                age_min = (now - placed).total_seconds() / 60
+                # Give the race time to run and results to publish before trying.
+                if age_min < 30:
+                    pending += 1
+                    continue
+
+                race_date = placed.astimezone(_UK_TZ).date()
+
+                # Populate event_name (course/date) for nicer notifications.
+                if not bet.event_name:
+                    try:
+                        async with db.session() as session:
+                            mrec = await MarketRepository(session).get(bet.market_id)
+                            if mrec:
+                                bet.event_name = mrec.event_name
+                    except Exception:
+                        pass
+
+                # Blocking HTTP on first lookup per date — run off the loop.
+                outcome = await loop.run_in_executor(
+                    None,
+                    racing_results_service.lookup,
+                    bet.selection_name,
+                    race_date,
+                )
+
+                if outcome in (RaceOutcome.WON, RaceOutcome.LOST):
+                    selection_won = outcome == RaceOutcome.WON
+                    success, pnl = self._simulator.settle_bet(bet.id, selection_won)
+                    if success:
+                        settled += 1
+                        await self._persist_hr_settlement(bet)
+                        logger.info(
+                            "Horse racing bet settled from Racing API",
+                            bet_id=bet.bet_ref,
+                            horse=bet.selection_name[:30] if bet.selection_name else "N/A",
+                            bet_type=bet.bet_type.value,
+                            outcome="WON" if selection_won else "LOST",
+                            pnl=f"£{pnl:+.2f}",
+                        )
+                elif outcome == RaceOutcome.NON_RUNNER or (
+                    outcome == RaceOutcome.ABSENT and age_min > 48 * 60
+                ):
+                    # Genuine non-runner, or never appeared in results after 48h
+                    # (almost always a non-runner; logged so name mismatches show).
+                    if self._simulator.void_bet(bet.id):
+                        voided += 1
+                        await self._persist_hr_settlement(bet)
+                        logger.info(
+                            "Horse racing bet voided",
+                            bet_id=bet.bet_ref,
+                            horse=bet.selection_name[:30] if bet.selection_name else "N/A",
+                            reason=outcome.value,
+                            age_h=f"{age_min / 60:.0f}h",
+                        )
+                else:
+                    # NO_DATA, or ABSENT but still recent — retry next cycle.
+                    pending += 1
+                    if outcome == RaceOutcome.ABSENT:
+                        logger.info(
+                            "Horse racing result not found yet (retrying)",
+                            bet_id=bet.bet_ref,
+                            horse=bet.selection_name[:30] if bet.selection_name else "N/A",
+                            race_date=race_date.isoformat(),
+                            age_h=f"{age_min / 60:.0f}h",
+                        )
+
+            if settled or voided or pending:
+                logger.info(
+                    "Horse racing settlement complete",
+                    settled=settled,
+                    voided=voided,
+                    pending=pending,
+                )
+
+        except Exception as e:
+            logger.error("Error settling horse-racing bets", error=str(e))
+
+    async def _persist_hr_settlement(self, bet: Bet) -> None:
+        """Mirror an in-memory HR settlement to tracking, Telegram and the DB."""
+        if bet.strategy in self._markets_with_bets:
+            self._markets_with_bets[bet.strategy].discard(bet.market_id)
+
+        try:
+            await notifier.bet_settled(bet)
+        except Exception as e:
+            logger.warning("Failed to notify HR settlement", error=str(e)[:100])
+
+        try:
+            async with db.session() as session:
+                bet_repo = BetRepository(session)
+                if bet.id:
+                    await bet_repo.settle(
+                        bet.id,
+                        bet.result,
+                        bet.profit_loss,
+                        bet.commission,
+                    )
+                    await session.commit()
+        except Exception as db_error:
+            logger.warning(
+                "Failed to update HR settlement in database",
+                error=str(db_error)[:100],
+            )
 
     async def reconcile_with_betfair(self) -> None:
         """

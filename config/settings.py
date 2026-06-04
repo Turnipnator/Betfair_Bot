@@ -85,6 +85,33 @@ class RiskSettings(BaseSettings):
     )
 
 
+class RacingApiSettings(BaseSettings):
+    """The Racing API credentials (theracingapi.com).
+
+    Used to settle horse-racing paper bets from finishing positions. Betfair
+    purges closed HR markets from list_market_book ~1-2h after the off, so we
+    can't rely on market data for settlement. These are the same credentials
+    the Nags bot uses.
+    """
+
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="", extra="ignore")
+
+    username: str = Field(
+        default="",
+        alias="RACING_API_USERNAME",
+        description="The Racing API username",
+    )
+    password: str = Field(
+        default="",
+        alias="RACING_API_PASSWORD",
+        description="The Racing API password",
+    )
+
+    def is_configured(self) -> bool:
+        """Check if Racing API credentials are present."""
+        return bool(self.username and self.password)
+
+
 class TelegramSettings(BaseSettings):
     """Telegram bot configuration."""
 
@@ -244,6 +271,7 @@ class Settings(BaseSettings):
 
     # Sub-settings (loaded from same .env)
     betfair: BetfairSettings = Field(default_factory=BetfairSettings)
+    racing_api: RacingApiSettings = Field(default_factory=RacingApiSettings)
     risk: RiskSettings = Field(default_factory=RiskSettings)
     telegram: TelegramSettings = Field(default_factory=TelegramSettings)
     market: MarketSettings = Field(default_factory=MarketSettings)

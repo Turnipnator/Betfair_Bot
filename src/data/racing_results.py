@@ -105,7 +105,14 @@ class RacingResultsService:
                 )
                 return None  # don't cache a partial day
 
-        self._cache[target] = races
+        # Only cache a non-empty day. An empty list means results aren't
+        # published yet (the job runs every 10 min and will hit the bet's own
+        # race day before the off). Caching [] would poison the date
+        # permanently — lookup() treats no races as NO_DATA, so the bet would
+        # never settle even after results go live. Returning [] uncached lets
+        # the next cycle re-fetch once results exist.
+        if races:
+            self._cache[target] = races
         return races
 
     def lookup(self, horse_name: str, race_date: date) -> RaceOutcome:

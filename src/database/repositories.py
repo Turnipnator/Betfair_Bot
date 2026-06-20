@@ -261,11 +261,18 @@ class BetRepository:
             silently skip; after max_age_days we drop them from the queue.
 
         Voided bets are excluded — CLV is meaningless for them.
+
+        Horse-racing (``nags_*``) bets are excluded too: a losing horse's
+        last_price_traded drifts toward Betfair's 1000.0 ceiling at the off,
+        so the CLV formula produces meaningless thousands-of-percent values
+        that falsely signal a huge edge. CLV is an exchange/football metric;
+        win/loss P&L is the real measure for the Nags strategies.
         """
         cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
         result = await self.session.execute(
             select(BetRecord)
             .where(BetRecord.placed_at >= cutoff)
+            .where(~BetRecord.strategy.like("nags%"))
             .where(
                 or_(
                     BetRecord.status == BetStatus.MATCHED.value,

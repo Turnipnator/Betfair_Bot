@@ -159,7 +159,14 @@ class _NagsDailyTracker:
     def __init__(self) -> None:
         self._date = date.today()
         self._bets_today = 0
-        self._markets_bet: set[str] = set()
+        # Keyed by (strategy, market_id), not market_id alone. nags_back and
+        # nags_lay_fav are complementary on the same race (back our pick AND
+        # lay the favourite — both win if the favourite underperforms), so one
+        # firing must NOT lock the other out of the market. A global market set
+        # blocked nags_lay_fav 100% of the time, since nags_back is evaluated
+        # first and claims essentially every pick-race. The daily cap below
+        # stays combined across both strategies.
+        self._markets_bet: set[tuple[str, str]] = set()
 
     def _maybe_reset(self) -> None:
         today = date.today()
@@ -169,20 +176,21 @@ class _NagsDailyTracker:
             self._markets_bet.clear()
             logger.info("Nags daily counters reset")
 
-    def can_bet(self, market_id: str) -> bool:
+    def can_bet(self, strategy: str, market_id: str) -> bool:
         self._maybe_reset()
         if self._bets_today >= DAILY_HORSE_RACING_BET_CAP:
             return False
-        if market_id in self._markets_bet:
+        if (strategy, market_id) in self._markets_bet:
             return False
         return True
 
-    def record_bet(self, market_id: str) -> None:
+    def record_bet(self, strategy: str, market_id: str) -> None:
         self._maybe_reset()
         self._bets_today += 1
-        self._markets_bet.add(market_id)
+        self._markets_bet.add((strategy, market_id))
         logger.info(
             "Nags bet recorded",
+            strategy=strategy,
             bets_today=self._bets_today,
             cap=DAILY_HORSE_RACING_BET_CAP,
         )
@@ -342,7 +350,7 @@ class _NagsStrategyBase(BaseStrategy):
         # 60s pre-close lockout and avoid late price thrash.
         if market.seconds_to_start < MIN_SECONDS_TO_OFF:
             return False
-        if not _tracker.can_bet(market.market_id):
+        if not _tracker.can_bet(self.name, market.market_id):
             return False
         return True
 
@@ -398,7 +406,7 @@ class NagsBackStrategy(_NagsStrategyBase):
                 continue
 
             odds = runner.best_back_price
-            _tracker.record_bet(market.market_id)
+            _tracker.record_bet(self.name, market.market_id)
             return BetSignal(
                 market_id=market.market_id,
                 selection_id=runner.selection_id,
@@ -500,7 +508,7 @@ class NagsLayFavStrategy(_NagsStrategyBase):
         if stake < 2.0:  # Betfair £2 minimum
             return None
 
-        _tracker.record_bet(market.market_id)
+        _tracker.record_bet(self.name, market.market_id)
         return BetSignal(
             market_id=market.market_id,
             selection_id=favourite.selection_id,

@@ -12,6 +12,7 @@ from typing import Optional
 
 import betfairlightweight
 from betfairlightweight import APIClient
+from betfairlightweight.endpoints.baseendpoint import BaseEndpoint
 from betfairlightweight.filters import market_filter, time_range
 from betfairlightweight.exceptions import APIError
 
@@ -56,6 +57,17 @@ class MatchState:
         return abs(self.home_score - self.away_score)
 
 logger = get_logger(__name__)
+
+# betfairlightweight defaults BaseEndpoint.connect_timeout to 3.05s, which
+# Betfair's API regularly exceeds under load. The result is a stream of
+# "Read timed out. (read timeout=3.05)" errors, failed keep-alives, and
+# session drops (see health check 2026-07-02: 81 timeouts in 3h). Raise the
+# connect timeout to tolerate slow TLS/TCP handshakes and bump the read
+# timeout for good measure. These are class attributes inherited by every
+# endpoint (betting, login, keep-alive, account), so setting them once on
+# BaseEndpoint covers the whole client.
+BETFAIR_CONNECT_TIMEOUT = 10.0
+BETFAIR_READ_TIMEOUT = 30.0
 
 # Betfair event type IDs
 EVENT_TYPE_IDS = {
@@ -130,6 +142,12 @@ class BetfairClient:
                     certs=str(cert_path.parent),
                 ),
             )
+
+            # Raise the too-tight default timeouts before any request is made
+            # (including the login call below). Class-level, so it applies to
+            # every endpoint on this and any future client instance.
+            BaseEndpoint.connect_timeout = BETFAIR_CONNECT_TIMEOUT
+            BaseEndpoint.read_timeout = BETFAIR_READ_TIMEOUT
 
             # Login
             await loop.run_in_executor(None, self._client.login)

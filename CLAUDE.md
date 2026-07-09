@@ -15,6 +15,8 @@ A fully automated sports betting bot for Betfair Exchange. Horse racing and foot
 
 ---
 
+When asked to do research or strategy analysis, first read RESEARCH.md and follow the protocol within it.
+
 ## Non-Negotiable Rules
 
 1. **Paper trade first** - Nothing touches real money until strategies prove themselves over 2+ weeks
@@ -89,6 +91,84 @@ All strategies must inherit from `BaseStrategy` with:
 
 ---
 
+## The Nags Horse-Racing Strategies
+
+Three strategies consume the daily picks produced by the separate **Nags** bot
+(`Turnipnator/Nags`). Nags writes its selections to its own SQLite, which this
+bot mounts **read-only** (`/root/horse-racing-bot/data:/app/nags-data:ro`).
+Nags contains no Betfair code; this bot contains no race analysis. The DB is
+the only interface.
+
+| Strategy | Market | Mode | Stake | What it does |
+|----------|--------|------|-------|--------------|
+| `nags_back` | `WIN` | 🔴 **LIVE** (9 Jul 2026) | £5 flat | Backs the Nags pick (NAP > NB > selection > race_nb) |
+| `nags_lay_fav` | `WIN` | PAPER | £5 liability cap | Lays the 2.0–4.0 favourite when Nags picked a longer horse |
+| `nags_place` | `PLACE` | PAPER | £5 flat | Each-way place leg on picks at 5/1+ |
+
+### `nags_back` went live on 9 July 2026 — read this before touching it
+
+It cleared non-negotiable rule #1 on *duration* (8 weeks paper, 14 May – 8 Jul)
+but the edge is **not proven**:
+
+```
++£89.15 over 65 decided bets, 24.6% strike
+  minus Priapos (15.5)          → +£20.27
+  minus Priapos AND Bearish (8.2) → -£13.93
+```
+
+Two horses carry the entire result. That is the signature of variance, not of
+demonstrated edge. It went live at **exactly the flat £5 WIN stake the paper
+run tested** — not scaled up, not restructured — precisely so the live record
+stays comparable to the paper record. Do not raise the stake or change the bet
+shape without a fresh paper trade. Real bankroll is ~£300; the 6-bet daily cap
+means £30 max daily exposure, inside the 15% daily-loss threshold.
+
+### Each-way is two bets, not one
+
+**Betfair's exchange has no each-way bet.** `BetType` is `BACK`/`LAY` only. A
+bookmaker EW is one stake on the WIN and one on the PLACE, so EW here is
+emulated as `nags_back` (WIN, live) + `nags_place` (PLACE, paper) on the same
+horse at the same stake. Note the exchange place market is *independently
+priced* — there is no "1/5 the odds" fraction.
+
+`nags_place` fires only on picks at **5/1 or longer**, read from the Nags
+`odds_guide`, because a PLACE market prices the *place* and cannot tell you
+whether a horse is a 5/1 shot. It is paper-only: the 8-week record validates
+flat WIN bets and says nothing about EW. Audit the two legs side by side with
+`/nags`, which pairs them per horse and prints the EW-vs-win-only delta. A
+positive delta over a real sample is the case for taking EW live.
+
+### Two guards that protect real money
+
+**1. `FORCE_PAPER_STRATEGIES` is the live/paper gate — and nothing else.**
+It used to *also* scope the durable Nags-results settlement fallback. Removing
+a strategy from it to take it live therefore silently orphaned that strategy's
+open paper bets (`reconcile_with_betfair()` skips `PAPER-` refs, so nothing
+settled them). The two concerns are now split: `HORSE_RACING_STRATEGIES` scopes
+settlement, `FORCE_PAPER_STRATEGIES` gates placement. Keep them separate.
+
+**2. `supported_market_types` keeps a WIN strategy out of PLACE markets.**
+`BaseStrategy.supports_market()` only checks sport. Once PLACE markets entered
+the scan, *every* horse-racing strategy could see them — the live `nags_back`
+would have backed its pick at place odds with real money. Every Nags strategy
+now declares `supported_market_types` and is gated in both `supports_market()`
+and `pre_evaluate()`. **Any new horse-racing strategy must declare it too.**
+
+`nags_place` also holds its own daily cap (`_CAP_GROUPS`), so a paper place leg
+can never exhaust the budget and lock the live win leg out of a real bet.
+
+### Settlement
+
+- **Live** HR bets settle from Betfair cleared orders (`reconcile_with_betfair`).
+- **Paper** HR bets settle from the Racing API (`_settle_horse_racing_bets`),
+  which is scoped to `PAPER-` refs so it never overwrites a live settlement.
+- **Place** bets win on `finishing position <= places`. Betfair exposes
+  `number_of_winners` only on `MarketBook`, so it is captured at bet time and
+  persisted to `markets.number_of_winners`. If it is unknown the bet is left
+  **pending, never settled on a guess** — a wrong place count fabricates P&L.
+
+---
+
 ## Telegram Commands
 
 Essential commands:
@@ -99,6 +179,7 @@ Essential commands:
 - `/performance` - Strategy comparison summary
 - `/report` - Generate weekly report
 - `/toggle <strategy>` - Enable/disable a strategy
+- `/nags` - Audit the Nags strategies: live win leg vs paper place leg, and the each-way delta
 
 ---
 
@@ -171,4 +252,4 @@ Generated Sunday 23:59. Must show:
 
 See `REFERENCE.md` for detailed code examples, database schema, Docker configuration, Betfair authentication setup, and strategy implementation specifics.
 
-https://traderline.com/education/betfair-hedging-strategies-profits for strategies 
+https://traderline.com/education/betfair-hedging-strategies-profits for strategies

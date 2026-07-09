@@ -652,47 +652,64 @@ class NagsPlaceStrategy(_NagsStrategyBase):
         }
         picks_sorted = sorted(picks, key=lambda p: priority.get(p.selection_type, 99))
 
-        for pick in picks_sorted:
-            win_odds = _parse_odds_guide(pick.odds_guide)
-            if win_odds is None:
-                # Can't establish the win price -> can't apply the 5/1 rule.
-                logger.debug(
-                    "No parseable odds_guide for place leg",
-                    horse=pick.horse,
-                    odds_guide=pick.odds_guide,
-                )
-                continue
-            if win_odds < EACH_WAY_MIN_WIN_ODDS:
-                continue  # shorter than 5/1 -> win-only, no place leg
+        # Resolve THE pick nags_back would back in this race: the first, in
+        # priority order, that maps to an active priced runner. Mirrors the
+        # skip conditions in NagsBackStrategy.evaluate().
+        pick = None
+        runner = None
+        for candidate in picks_sorted:
+            r = _match_runner_to_pick(market, candidate)
+            if r is None or r.status != "ACTIVE" or not r.best_back_price:
+                continue  # non-runner / unpriced: nags_back would skip it too
+            pick, runner = candidate, r
+            break
 
-            runner = _match_runner_to_pick(market, pick)
-            if runner is None:
-                continue
-            if runner.status != "ACTIVE":
-                continue
-            if not runner.best_back_price:
-                continue
+        if pick is None:
+            return None
 
-            place_odds = runner.best_back_price
-            _tracker.record_bet(self.name, market.market_id)
-            return BetSignal(
-                market_id=market.market_id,
-                selection_id=runner.selection_id,
-                selection_name=runner.name,
-                bet_type=BetType.BACK,
-                odds=place_odds,
-                stake=PLACE_FLAT_STAKE,
-                strategy=self.name,
-                sport=Sport.HORSE_RACING,
-                market_name=market.market_name,
-                event_name=market.event_name,
-                reason=(
-                    f"EW place leg: Nags {pick.selection_type} @ {pick.odds_guide} "
-                    f"(win {win_odds:.2f} >= {EACH_WAY_MIN_WIN_ODDS}); "
-                    f"{market.number_of_winners} places"
-                ),
-                market_start_time=market.start_time,
-                market_type=market.market_type,
-                number_of_winners=market.number_of_winners,
+        # From here every failure is TERMINAL — never fall through to a
+        # lower-priority pick. This is the each-way leg of the win bet, so it
+        # must be the SAME horse nags_back backed or it is not an EW leg at
+        # all. (9 Jul 2026: a `continue` here skipped Thunder Call at 7/2 and
+        # placed on Calico Blue, a race_nb nags_back never touched.)
+        win_odds = _parse_odds_guide(pick.odds_guide)
+        if win_odds is None:
+            # Can't establish the win price -> can't apply the 5/1 rule.
+            logger.debug(
+                "No parseable odds_guide for place leg",
+                horse=pick.horse,
+                odds_guide=pick.odds_guide,
             )
-        return None
+            return None
+        if win_odds < EACH_WAY_MIN_WIN_ODDS:
+            # Shorter than 5/1 -> win-only. No place leg in this race.
+            logger.debug(
+                "Nags pick shorter than EW threshold, no place leg",
+                horse=pick.horse,
+                win_odds=win_odds,
+                threshold=EACH_WAY_MIN_WIN_ODDS,
+            )
+            return None
+
+        place_odds = runner.best_back_price
+        _tracker.record_bet(self.name, market.market_id)
+        return BetSignal(
+            market_id=market.market_id,
+            selection_id=runner.selection_id,
+            selection_name=runner.name,
+            bet_type=BetType.BACK,
+            odds=place_odds,
+            stake=PLACE_FLAT_STAKE,
+            strategy=self.name,
+            sport=Sport.HORSE_RACING,
+            market_name=market.market_name,
+            event_name=market.event_name,
+            reason=(
+                f"EW place leg: Nags {pick.selection_type} @ {pick.odds_guide} "
+                f"(win {win_odds:.2f} >= {EACH_WAY_MIN_WIN_ODDS}); "
+                f"{market.number_of_winners} places"
+            ),
+            market_start_time=market.start_time,
+            market_type=market.market_type,
+            number_of_winners=market.number_of_winners,
+        )

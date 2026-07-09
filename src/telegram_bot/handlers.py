@@ -642,11 +642,20 @@ async def handle_nags(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await _unauthorized(update)
         return
 
+    # NB: mode is read from CONFIG, never from the rows. A strategy that ran
+    # 8 weeks in paper then went live still has mostly is_paper=1 history, so
+    # deriving the label from the data would report a live strategy as PAPER.
+    from src.strategies.horse_racing import FORCE_PAPER_STRATEGIES
+
+    def _mode(strategy: str) -> str:
+        live = settings.is_live_mode() and strategy not in FORCE_PAPER_STRATEGIES
+        return "🔴 LIVE" if live else "PAPER"
+
     per_strategy_sql = text(
         """
         SELECT strategy,
-               MAX(is_paper)                                        AS is_paper,
                COUNT(*)                                             AS bets,
+               SUM(CASE WHEN is_paper=0 THEN 1 ELSE 0 END)          AS live_bets,
                SUM(CASE WHEN result='WON'  THEN 1 ELSE 0 END)       AS won,
                SUM(CASE WHEN result='LOST' THEN 1 ELSE 0 END)       AS lost,
                SUM(CASE WHEN result='VOID' THEN 1 ELSE 0 END)       AS void,
@@ -691,14 +700,14 @@ async def handle_nags(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     msg = "🐴 *Nags Strategy Audit*\n\n"
     for r in rows:
-        mode = "PAPER" if r.is_paper else "🔴 LIVE"
         decided = (r.won or 0) + (r.lost or 0)
         sr = f"{(r.won or 0) / decided * 100:.1f}%" if decided else "n/a"
         roi = f"{(r.net_pl or 0) / r.staked * 100:+.1f}%" if r.staked else "n/a"
         msg += (
-            f"*{r.strategy}* ({mode})\n"
+            f"*{r.strategy}* ({_mode(r.strategy)})\n"
             f"  P&L: £{r.net_pl:+.2f} | ROI: {roi}\n"
-            f"  {r.won}W-{r.lost}L ({sr}) | {r.void} void | {decided} decided\n\n"
+            f"  {r.won}W-{r.lost}L ({sr}) | {r.void} void | {decided} decided\n"
+            f"  {r.live_bets} of {r.bets} bets were real money\n\n"
         )
 
     if ew_rows:

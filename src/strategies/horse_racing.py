@@ -49,11 +49,25 @@ BACK_FLAT_STAKE = 5.0
 LAY_LIABILITY_CAP = 5.0
 MIN_SECONDS_TO_OFF = 300  # don't bet inside the last 5 minutes
 
+# Every horse-racing strategy, live or paper. Used to scope the durable
+# Nags results settlement fallback. Kept separate from the live/paper gate
+# below: a strategy going live must not silently lose its settlement path.
+HORSE_RACING_STRATEGIES: frozenset[str] = frozenset({
+    "nags_back",
+    "nags_lay_fav",
+})
+
 # Strategies in this set are forced to paper mode even when the bot is
 # running LIVE — used during the observation window for new strategies
 # while the rest of the book (football, value, LTD, arb) trades live.
+#
+# nags_back went LIVE 2026-07-09 (flat £5 WIN) after an 8-week paper run:
+# +£99.15 over 65 decided bets. Note the edge is unproven — strip the two
+# biggest winners (Priapos 15.5, Bearish 8.2) and it is -£3.93. Live bets
+# settle via reconcile_with_betfair(), not the Nags results fallback.
+#
+# nags_lay_fav stays paper: -£1.35 on only 5 decided bets, no evidence base.
 FORCE_PAPER_STRATEGIES: frozenset[str] = frozenset({
-    "nags_back",
     "nags_lay_fav",
 })
 

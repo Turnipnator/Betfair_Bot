@@ -40,7 +40,10 @@ from src.strategies import (
     NagsBackStrategy,
     NagsLayFavStrategy,
 )
-from src.strategies.horse_racing import FORCE_PAPER_STRATEGIES
+from src.strategies.horse_racing import (
+    FORCE_PAPER_STRATEGIES,
+    HORSE_RACING_STRATEGIES,
+)
 from src.telegram_bot import telegram_bot, notifier
 from src.reporting import report_generator, daily_report_generator
 from src.utils import calculate_stake, calculate_kelly_stake, compute_clv_percent
@@ -143,10 +146,11 @@ class PaperTradingEngine:
             bet_repo = BetRepository(session)
             open_bet_records = list(await bet_repo.get_open(is_paper=is_paper))
             if not is_paper:
-                # Even in live mode the Nags strategies run as forced-paper bets
-                # (FORCE_PAPER_STRATEGIES). Load those open paper bets too, or
-                # they'd never be tracked in the simulator after a restart and
-                # could never be settled by settle_horse_racing_bets().
+                # Even in live mode some strategies still run as forced-paper
+                # bets (FORCE_PAPER_STRATEGIES, e.g. nags_lay_fav). Load those
+                # open paper bets too, or they'd never be tracked in the
+                # simulator after a restart and could never be settled by
+                # settle_horse_racing_bets().
                 open_bet_records += list(await bet_repo.get_open(is_paper=True))
             if open_bet_records:
                 # Convert BetRecord to Bet objects
@@ -1084,8 +1088,10 @@ class PaperTradingEngine:
         from a source that stays queryable for weeks, so it both settles fresh
         bets and backfills ones stuck for days.
 
-        Scoped to the Nags strategies (the only horse-racing strategies, all
-        forced to paper). Football/value/LTD bets are untouched.
+        Scoped to PAPER horse-racing bets. Live HR bets carry a real Betfair
+        ref and are settled authoritatively by reconcile_with_betfair() from
+        cleared orders, so they must not be settled from scraped results here.
+        Football/value/LTD bets are untouched.
         """
         from src.data.racing_results import racing_results_service, RaceOutcome
 
@@ -1094,7 +1100,13 @@ class PaperTradingEngine:
 
         try:
             open_bets = self._simulator.get_open_bets()
-            hr_bets = [b for b in open_bets if b.strategy in FORCE_PAPER_STRATEGIES]
+            hr_bets = [
+                b
+                for b in open_bets
+                if b.strategy in HORSE_RACING_STRATEGIES
+                and b.bet_ref
+                and b.bet_ref.startswith("PAPER-")
+            ]
             if not hr_bets:
                 return
 

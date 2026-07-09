@@ -49,12 +49,27 @@ BACK_FLAT_STAKE = 5.0
 LAY_LIABILITY_CAP = 5.0
 MIN_SECONDS_TO_OFF = 300  # don't bet inside the last 5 minutes
 
+# nags_place (the each-way place leg) filters.
+#
+# CLAUDE.md: "anything 5/1 or over to be each way". 5/1 == 6.0 decimal, read
+# from the Nags odds_guide (the morning price the rubric was applied to), not
+# from the live place-market price — the place market prices the PLACE, not
+# the WIN, so it cannot tell us whether the horse is a 5/1-plus shot.
+EACH_WAY_MIN_WIN_ODDS = 6.0
+PLACE_FLAT_STAKE = 5.0  # mirrors BACK_FLAT_STAKE: an EW bet stakes each leg
+# Betfair offers no place pool below 5 runners.
+PLACE_MIN_RUNNERS = 5
+# nags_place gets its OWN daily cap. It is paper-only and must never consume
+# a slot that the live nags_back would otherwise use.
+DAILY_PLACE_BET_CAP = 6
+
 # Every horse-racing strategy, live or paper. Used to scope the durable
 # Nags results settlement fallback. Kept separate from the live/paper gate
 # below: a strategy going live must not silently lose its settlement path.
 HORSE_RACING_STRATEGIES: frozenset[str] = frozenset({
     "nags_back",
     "nags_lay_fav",
+    "nags_place",
 })
 
 # Strategies in this set are forced to paper mode even when the bot is
@@ -67,8 +82,14 @@ HORSE_RACING_STRATEGIES: frozenset[str] = frozenset({
 # settle via reconcile_with_betfair(), not the Nags results fallback.
 #
 # nags_lay_fav stays paper: -£1.35 on only 5 decided bets, no evidence base.
+#
+# nags_place is the each-way place leg, running in paper alongside the LIVE
+# nags_back win leg so the EW variant can be audited before it risks money.
+# The 8-week paper record validates flat WIN bets ONLY — it says nothing
+# about EW, so EW must earn its own record first.
 FORCE_PAPER_STRATEGIES: frozenset[str] = frozenset({
     "nags_lay_fav",
+    "nags_place",
 })
 
 # nags_lay_fav (B1a) filters.
@@ -167,32 +188,47 @@ def _course_from_race_name(race_name: Optional[str]) -> Optional[str]:
     return course or None
 
 
+# Cap groups. nags_back + nags_lay_fav share one daily budget (they are
+# complementary bets on the same race). nags_place is paper-only and gets its
+# own budget: a paper place leg must never exhaust the cap and lock the LIVE
+# nags_back out of a real bet.
+_CAP_GROUPS: dict[str, tuple[str, int]] = {
+    "nags_back": ("primary", DAILY_HORSE_RACING_BET_CAP),
+    "nags_lay_fav": ("primary", DAILY_HORSE_RACING_BET_CAP),
+    "nags_place": ("place", DAILY_PLACE_BET_CAP),
+}
+
+
 class _NagsDailyTracker:
-    """In-memory daily cap shared across both Nags strategies."""
+    """In-memory daily caps, per cap-group, across the Nags strategies."""
 
     def __init__(self) -> None:
         self._date = date.today()
-        self._bets_today = 0
+        self._bets_today: dict[str, int] = {}
         # Keyed by (strategy, market_id), not market_id alone. nags_back and
         # nags_lay_fav are complementary on the same race (back our pick AND
         # lay the favourite — both win if the favourite underperforms), so one
         # firing must NOT lock the other out of the market. A global market set
         # blocked nags_lay_fav 100% of the time, since nags_back is evaluated
-        # first and claims essentially every pick-race. The daily cap below
-        # stays combined across both strategies.
+        # first and claims essentially every pick-race.
         self._markets_bet: set[tuple[str, str]] = set()
+
+    @staticmethod
+    def _group(strategy: str) -> tuple[str, int]:
+        return _CAP_GROUPS.get(strategy, ("primary", DAILY_HORSE_RACING_BET_CAP))
 
     def _maybe_reset(self) -> None:
         today = date.today()
         if self._date != today:
             self._date = today
-            self._bets_today = 0
+            self._bets_today.clear()
             self._markets_bet.clear()
             logger.info("Nags daily counters reset")
 
     def can_bet(self, strategy: str, market_id: str) -> bool:
         self._maybe_reset()
-        if self._bets_today >= DAILY_HORSE_RACING_BET_CAP:
+        group, cap = self._group(strategy)
+        if self._bets_today.get(group, 0) >= cap:
             return False
         if (strategy, market_id) in self._markets_bet:
             return False
@@ -200,13 +236,15 @@ class _NagsDailyTracker:
 
     def record_bet(self, strategy: str, market_id: str) -> None:
         self._maybe_reset()
-        self._bets_today += 1
+        group, cap = self._group(strategy)
+        self._bets_today[group] = self._bets_today.get(group, 0) + 1
         self._markets_bet.add((strategy, market_id))
         logger.info(
             "Nags bet recorded",
             strategy=strategy,
-            bets_today=self._bets_today,
-            cap=DAILY_HORSE_RACING_BET_CAP,
+            cap_group=group,
+            bets_today=self._bets_today[group],
+            cap=cap,
         )
 
 
@@ -328,6 +366,13 @@ class _NagsStrategyBase(BaseStrategy):
     supported_sports: list[Sport] = [Sport.HORSE_RACING]
     requires_inplay: bool = False
 
+    # SAFETY: BaseStrategy.supports_market() only checks sport and in-play, so
+    # once PLACE markets are added to the scan every horse-racing strategy sees
+    # them. Without this gate the LIVE nags_back would back its pick in the
+    # "To Be Placed" market at place odds — a real-money bet nobody asked for.
+    # Each strategy declares exactly the market type it understands.
+    supported_market_types: frozenset[str] = frozenset({"WIN"})
+
     # Re-read Nags DB at most this often. Short enough that picks
     # written mid-day by the Nags bot appear within a couple of
     # scan cycles; long enough that we're not hammering SQLite for
@@ -357,8 +402,19 @@ class _NagsStrategyBase(BaseStrategy):
             )
         return self._picks_cache
 
+    def supports_market(self, market: Market) -> bool:
+        if not super().supports_market(market):
+            return False
+        # See supported_market_types above — this is the guard that keeps a
+        # WIN strategy out of PLACE markets and vice versa.
+        return (market.market_type or "") in self.supported_market_types
+
     def pre_evaluate(self, market: Market) -> bool:
         if not super().pre_evaluate(market):
+            return False
+        # Belt and braces: pre_evaluate() is reachable without supports_market()
+        # in some call paths, and this gate protects real money.
+        if (market.market_type or "") not in self.supported_market_types:
             return False
         # Off-time cutoff — 5 minutes is enough margin to clear the
         # 60s pre-close lockout and avoid late price thrash.
@@ -438,6 +494,7 @@ class NagsBackStrategy(_NagsStrategyBase):
                     else f"Nags {pick.selection_type}"
                 ),
                 market_start_time=market.start_time,
+                market_type=market.market_type,
             )
         return None
 
@@ -539,4 +596,103 @@ class NagsLayFavStrategy(_NagsStrategyBase):
                 f"@~{pick_price:.2f}; laying fav @{lay_price:.2f}"
             ),
             market_start_time=market.start_time,
+            market_type=market.market_type,
         )
+
+
+class NagsPlaceStrategy(_NagsStrategyBase):
+    """Back the Nags pick in the "To Be Placed" market — the each-way place leg.
+
+    Betfair's exchange has no each-way bet. A bookmaker EW is one stake on the
+    WIN and one on the PLACE, so here EW is emulated as two independent bets:
+    ``nags_back`` on the WIN market and ``nags_place`` on the PLACE market, on
+    the same horse, at the same flat stake.
+
+    Fires only when the pick's WIN odds are ``EACH_WAY_MIN_WIN_ODDS`` (5/1) or
+    longer, matching the CLAUDE.md rule. Note the *win* price is taken from the
+    Nags ``odds_guide``, not from this market: a PLACE market prices the place,
+    so it cannot tell us whether the horse is a 5/1-plus shot.
+
+    Paper-only (see FORCE_PAPER_STRATEGIES) so the EW variant builds its own
+    record alongside the live win-only leg before it ever risks money. It also
+    draws on its own daily cap, so it cannot starve live ``nags_back``.
+    """
+
+    name: str = "nags_place"
+    supported_market_types: frozenset[str] = frozenset({"PLACE"})
+
+    async def evaluate(self, market: Market) -> Optional[BetSignal]:
+        if not self.pre_evaluate(market):
+            return None
+
+        # No bookmaker place pool below 5 runners; Betfair mirrors this by not
+        # framing the market, but guard anyway in case one is listed early.
+        active = [r for r in market.runners if r.status == "ACTIVE"]
+        if len(active) < PLACE_MIN_RUNNERS:
+            return None
+
+        # Places paid. Without it the bet cannot be settled later, so skip
+        # rather than guess — a wrong place count silently fakes the P&L.
+        if not market.number_of_winners:
+            logger.debug(
+                "Place market has no number_of_winners, skipping",
+                market=market.market_id,
+            )
+            return None
+
+        picks = _picks_for_market(market, _index_picks_by_race(self._todays_picks()))
+        if not picks:
+            return None
+
+        priority = {
+            SELECTION_TYPE_NAP: 0,
+            SELECTION_TYPE_NEXT_BEST: 1,
+            SELECTION_TYPE_SELECTION: 2,
+            SELECTION_TYPE_RACE_NB: 3,
+        }
+        picks_sorted = sorted(picks, key=lambda p: priority.get(p.selection_type, 99))
+
+        for pick in picks_sorted:
+            win_odds = _parse_odds_guide(pick.odds_guide)
+            if win_odds is None:
+                # Can't establish the win price -> can't apply the 5/1 rule.
+                logger.debug(
+                    "No parseable odds_guide for place leg",
+                    horse=pick.horse,
+                    odds_guide=pick.odds_guide,
+                )
+                continue
+            if win_odds < EACH_WAY_MIN_WIN_ODDS:
+                continue  # shorter than 5/1 -> win-only, no place leg
+
+            runner = _match_runner_to_pick(market, pick)
+            if runner is None:
+                continue
+            if runner.status != "ACTIVE":
+                continue
+            if not runner.best_back_price:
+                continue
+
+            place_odds = runner.best_back_price
+            _tracker.record_bet(self.name, market.market_id)
+            return BetSignal(
+                market_id=market.market_id,
+                selection_id=runner.selection_id,
+                selection_name=runner.name,
+                bet_type=BetType.BACK,
+                odds=place_odds,
+                stake=PLACE_FLAT_STAKE,
+                strategy=self.name,
+                sport=Sport.HORSE_RACING,
+                market_name=market.market_name,
+                event_name=market.event_name,
+                reason=(
+                    f"EW place leg: Nags {pick.selection_type} @ {pick.odds_guide} "
+                    f"(win {win_odds:.2f} >= {EACH_WAY_MIN_WIN_ODDS}); "
+                    f"{market.number_of_winners} places"
+                ),
+                market_start_time=market.start_time,
+                market_type=market.market_type,
+                number_of_winners=market.number_of_winners,
+            )
+        return None

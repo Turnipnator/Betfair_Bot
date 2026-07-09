@@ -95,6 +95,12 @@ class Market:
     competition: Optional[str] = None
     event_id: Optional[int] = None  # Betfair event ID for in-play data
 
+    # Places paid on a TO_BE_PLACED (PLACE) market — 2 for 5-7 runners, 3 for
+    # 8+, 4 for big handicaps. Betfair only exposes this on MarketBook, not on
+    # the catalogue, so it is None on catalogue-only Market objects. Required
+    # to settle place bets (finishing position <= number_of_winners).
+    number_of_winners: Optional[int] = None
+
     # Market state
     status: MarketStatus = MarketStatus.OPEN
     in_play: bool = False

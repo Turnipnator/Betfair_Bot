@@ -68,6 +68,13 @@ class BetSignal:
     competition: Optional[str] = None  # Competition name (e.g., "Premier League", "EFL Cup")
     reason: str = ""
 
+    # Betfair market type ("WIN", "PLACE", "MATCH_ODDS"). Needed so a PLACE
+    # bet isn't persisted as a WIN market, and so settlement can tell a place
+    # leg from a win leg.
+    market_type: Optional[str] = None
+    # Places paid, for PLACE markets only.
+    number_of_winners: Optional[int] = None
+
     # Timing
     signal_time: datetime = field(default_factory=datetime.utcnow)
     market_start_time: Optional[datetime] = None  # Actual kick-off time from Betfair

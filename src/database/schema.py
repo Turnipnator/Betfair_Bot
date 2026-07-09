@@ -45,6 +45,9 @@ class MarketRecord(Base):
     status: Mapped[str] = mapped_column(String(20), default="OPEN")
     total_matched: Mapped[float] = mapped_column(Float, default=0.0)
     event_id: Mapped[Optional[int]] = mapped_column(Integer)  # Betfair event ID for in-play data
+    # Places paid on a PLACE market; None for WIN/MATCH_ODDS. Needed to settle
+    # place bets after a restart, when the live Market object is long gone.
+    number_of_winners: Mapped[Optional[int]] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     # Relationships

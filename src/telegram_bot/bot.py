@@ -117,6 +117,7 @@ class TradingBot:
             handle_daily,
             handle_help,
             handle_monthly,
+            handle_nags,
             handle_performance,
             handle_positions,
             handle_report,
@@ -144,6 +145,7 @@ class TradingBot:
         self._app.add_handler(CommandHandler("positions", handle_positions))
         self._app.add_handler(CommandHandler("performance", handle_performance))
         self._app.add_handler(CommandHandler("stats", handle_stats))
+        self._app.add_handler(CommandHandler("nags", handle_nags))
         self._app.add_handler(CommandHandler("report", handle_report))
         self._app.add_handler(CommandHandler("daily", handle_daily))
         self._app.add_handler(CommandHandler("weekly", handle_weekly))

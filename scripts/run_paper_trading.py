@@ -39,6 +39,7 @@ from src.strategies import (
     ArbitrageStrategy,
     NagsBackStrategy,
     NagsLayFavStrategy,
+    NagsPlaceStrategy,
 )
 from src.strategies.horse_racing import (
     FORCE_PAPER_STRATEGIES,
@@ -250,6 +251,7 @@ class PaperTradingEngine:
             "arbitrage": ArbitrageStrategy,
             "nags_back": NagsBackStrategy,
             "nags_lay_fav": NagsLayFavStrategy,
+            "nags_place": NagsPlaceStrategy,
         }
 
         self._strategies = []
@@ -650,13 +652,17 @@ class PaperTradingEngine:
 
             # Horse racing has different cadence: markets created ~1h before
             # race, only GB/IE relevant for Nags integration.
+            #
+            # PLACE ("To Be Placed") markets feed the paper nags_place each-way
+            # leg. Every Nags strategy declares supported_market_types, so the
+            # live nags_back cannot bet into a PLACE market by mistake.
             horse_racing_filter = MarketFilter(
                 sports=[Sport.HORSE_RACING],
-                market_types=["WIN"],
+                market_types=["WIN", "PLACE"],
                 countries=["GB", "IE"],
                 from_hours=0.0,
                 to_hours=2.0,
-                max_results=100,
+                max_results=200,
             )
 
             # Second filter for UEFA competitions (no country filter, will filter by competition name)
@@ -1139,15 +1145,38 @@ class PaperTradingEngine:
                         pass
 
                 # Blocking HTTP on first lookup per date — run off the loop.
-                outcome = await loop.run_in_executor(
+                outcome, position = await loop.run_in_executor(
                     None,
-                    racing_results_service.lookup,
+                    racing_results_service.lookup_position,
                     bet.selection_name,
                     race_date,
                 )
 
+                # A place leg wins on "finished in the places", not "won".
+                is_place_bet = bet.strategy == "nags_place"
+                places: Optional[int] = None
+                if is_place_bet and outcome in (RaceOutcome.WON, RaceOutcome.LOST):
+                    places = await self._places_for_market(bet.market_id)
+                    if not places:
+                        # Never guess the place count — a wrong number silently
+                        # fabricates P&L. Leave pending and log loudly.
+                        pending += 1
+                        logger.warning(
+                            "Place bet has no known place count, cannot settle",
+                            bet_id=bet.bet_ref,
+                            market_id=bet.market_id,
+                            horse=bet.selection_name,
+                        )
+                        continue
+
                 if outcome in (RaceOutcome.WON, RaceOutcome.LOST):
-                    selection_won = outcome == RaceOutcome.WON
+                    if is_place_bet:
+                        if position is None:
+                            pending += 1
+                            continue
+                        selection_won = position <= places
+                    else:
+                        selection_won = outcome == RaceOutcome.WON
                     success, pnl = self._simulator.settle_bet(bet.id, selection_won)
                     if success:
                         settled += 1
@@ -1155,8 +1184,11 @@ class PaperTradingEngine:
                         logger.info(
                             "Horse racing bet settled from Racing API",
                             bet_id=bet.bet_ref,
+                            strategy=bet.strategy,
                             horse=bet.selection_name[:30] if bet.selection_name else "N/A",
                             bet_type=bet.bet_type.value,
+                            position=position,
+                            places=places if is_place_bet else None,
                             outcome="WON" if selection_won else "LOST",
                             pnl=f"£{pnl:+.2f}",
                         )
@@ -1197,6 +1229,24 @@ class PaperTradingEngine:
 
         except Exception as e:
             logger.error("Error settling horse-racing bets", error=str(e))
+
+    async def _places_for_market(self, market_id: str) -> Optional[int]:
+        """Places paid by a PLACE market, from the persisted market record.
+
+        Betfair only exposes ``number_of_winners`` on MarketBook, so it is
+        captured at bet time and stored. Returns None if unknown — callers must
+        treat that as "cannot settle yet" rather than assuming a place count.
+        """
+        try:
+            async with db.session() as session:
+                record = await MarketRepository(session).get(market_id)
+                if record and record.number_of_winners:
+                    return int(record.number_of_winners)
+        except Exception as e:
+            logger.warning(
+                "Failed to read place count", market_id=market_id, error=str(e)[:100]
+            )
+        return None
 
     async def _persist_hr_settlement(self, bet: Bet) -> None:
         """Mirror an in-memory HR settlement to tracking, Telegram and the DB."""
@@ -1818,15 +1868,24 @@ class PaperTradingEngine:
                             from src.models import Market, MarketStatus
                             # Use actual start_time from signal (from Betfair), fallback to now
                             actual_start_time = signal.market_start_time or datetime.now(timezone.utc)
+                            # Prefer the market type the signal actually came
+                            # from — a PLACE bet must not be recorded as WIN.
+                            if signal.market_type:
+                                mkt_type = signal.market_type
+                            elif signal.sport and signal.sport.value == "horse_racing":
+                                mkt_type = "WIN"
+                            else:
+                                mkt_type = "MATCH_ODDS"
                             minimal_market = Market(
                                 market_id=signal.market_id,
                                 market_name=signal.market_name or "Unknown",
                                 event_name=signal.event_name or "Unknown",
                                 sport=signal.sport,
-                                market_type="WIN" if signal.sport and signal.sport.value == "horse_racing" else "MATCH_ODDS",
+                                market_type=mkt_type,
                                 start_time=actual_start_time,
                                 event_id=signal.event_id,
                                 status=MarketStatus.OPEN,
+                                number_of_winners=signal.number_of_winners,
                             )
                             await market_repo.save(minimal_market)
                             market_start_time = minimal_market.start_time

@@ -63,11 +63,44 @@ logger = get_logger(__name__)
 # "Read timed out. (read timeout=3.05)" errors, failed keep-alives, and
 # session drops (see health check 2026-07-02: 81 timeouts in 3h). Raise the
 # connect timeout to tolerate slow TLS/TCP handshakes and bump the read
-# timeout for good measure. These are class attributes inherited by every
-# endpoint (betting, login, keep-alive, account), so setting them once on
-# BaseEndpoint covers the whole client.
-BETFAIR_CONNECT_TIMEOUT = 10.0
+# timeout for good measure.
+BETFAIR_CONNECT_TIMEOUT = 15.0
 BETFAIR_READ_TIMEOUT = 30.0
+
+# Retries for the account-funds read. It is the single source of truth for
+# the live bankroll, and a transient timeout there silently falls the engine
+# back to a *computed* bankroll that can drift from the real balance.
+ACCOUNT_FUNDS_ATTEMPTS = 3
+ACCOUNT_FUNDS_BACKOFF = 2.0
+
+
+def _apply_betfair_timeouts() -> None:
+    """Force our timeouts onto BaseEndpoint *and* every subclass.
+
+    betfairlightweight stores connect/read timeouts as CLASS attributes, and
+    some endpoints shadow them in their own ``__dict__`` — notably ``Account``
+    (``connect_timeout = 6.05``). Assigning to ``BaseEndpoint`` alone leaves
+    those overrides untouched, so ``get_account_funds`` kept dying at 6.05s
+    while the rest of the client used the raised values. urllib3 reports the
+    stalled connect budget as "read timeout=6.05", which is what made this
+    look like a read problem rather than a shadowed class attribute.
+    """
+    BaseEndpoint.connect_timeout = BETFAIR_CONNECT_TIMEOUT
+    BaseEndpoint.read_timeout = BETFAIR_READ_TIMEOUT
+
+    stack = [BaseEndpoint]
+    seen: set[type] = set()
+    while stack:
+        for sub in stack.pop().__subclasses__():
+            if sub in seen:
+                continue
+            seen.add(sub)
+            # Only clobber where the subclass shadows the inherited value.
+            if "connect_timeout" in sub.__dict__:
+                sub.connect_timeout = BETFAIR_CONNECT_TIMEOUT
+            if "read_timeout" in sub.__dict__:
+                sub.read_timeout = BETFAIR_READ_TIMEOUT
+            stack.append(sub)
 
 # Betfair event type IDs
 EVENT_TYPE_IDS = {
@@ -146,8 +179,7 @@ class BetfairClient:
             # Raise the too-tight default timeouts before any request is made
             # (including the login call below). Class-level, so it applies to
             # every endpoint on this and any future client instance.
-            BaseEndpoint.connect_timeout = BETFAIR_CONNECT_TIMEOUT
-            BaseEndpoint.read_timeout = BETFAIR_READ_TIMEOUT
+            _apply_betfair_timeouts()
 
             # Login
             await loop.run_in_executor(None, self._client.login)
@@ -207,18 +239,37 @@ class BetfairClient:
         if not self.is_logged_in:
             raise RuntimeError("Not logged in to Betfair")
 
-        try:
-            loop = asyncio.get_event_loop()
-            funds = await loop.run_in_executor(
-                None, self._client.account.get_account_funds
-            )
-            available = funds.available_to_bet_balance
-            exposure = funds.exposure  # This is negative when we have exposure
-            total = available + abs(exposure)
-            return available, exposure, total
-        except Exception as e:
-            logger.error("Failed to get account funds", error=str(e))
-            raise
+        loop = asyncio.get_event_loop()
+        last_error: Optional[Exception] = None
+
+        for attempt in range(1, ACCOUNT_FUNDS_ATTEMPTS + 1):
+            try:
+                funds = await loop.run_in_executor(
+                    None, self._client.account.get_account_funds
+                )
+                available = funds.available_to_bet_balance
+                exposure = funds.exposure  # Negative when we have exposure
+                total = available + abs(exposure)
+                return available, exposure, total
+            except Exception as e:
+                last_error = e
+                if attempt < ACCOUNT_FUNDS_ATTEMPTS:
+                    wait = ACCOUNT_FUNDS_BACKOFF * attempt
+                    logger.warning(
+                        "get_account_funds failed, retrying",
+                        attempt=attempt,
+                        of=ACCOUNT_FUNDS_ATTEMPTS,
+                        retry_in=wait,
+                        error=str(e),
+                    )
+                    await asyncio.sleep(wait)
+
+        logger.error(
+            "Failed to get account funds",
+            attempts=ACCOUNT_FUNDS_ATTEMPTS,
+            error=str(last_error),
+        )
+        raise last_error
 
     async def get_markets(self, filter: MarketFilter) -> list[Market]:
         """
@@ -420,6 +471,9 @@ class BetfairClient:
             market.status = MarketStatus(book.status) if book.status else MarketStatus.OPEN
             market.in_play = book.inplay or False
             market.total_matched = book.total_matched or 0.0
+            # Only present on MarketBook (not the catalogue). Drives place-bet
+            # settlement, so it must be carried through to the Market model.
+            market.number_of_winners = getattr(book, "number_of_winners", None)
 
             # Update runner prices
             runner_by_id = {r.selection_id: r for r in market.runners}

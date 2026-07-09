@@ -629,3 +629,95 @@ async def handle_unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text(
         "Unknown command. Type /help for available commands."
     )
+
+
+async def handle_nags(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /nags - audit the Nags horse-racing strategies side by side.
+
+    Shows the LIVE win leg (nags_back) next to the PAPER place leg
+    (nags_place), then pairs them per horse to answer the only question that
+    matters before EW goes live: would each-way have beaten win-only?
+    """
+    if not _is_authorized(update):
+        await _unauthorized(update)
+        return
+
+    per_strategy_sql = text(
+        """
+        SELECT strategy,
+               MAX(is_paper)                                        AS is_paper,
+               COUNT(*)                                             AS bets,
+               SUM(CASE WHEN result='WON'  THEN 1 ELSE 0 END)       AS won,
+               SUM(CASE WHEN result='LOST' THEN 1 ELSE 0 END)       AS lost,
+               SUM(CASE WHEN result='VOID' THEN 1 ELSE 0 END)       AS void,
+               ROUND(SUM(CASE WHEN result IN ('WON','LOST')
+                              THEN stake ELSE 0 END), 2)            AS staked,
+               ROUND(SUM(COALESCE(profit_loss, 0)), 2)              AS net_pl
+        FROM bets
+        WHERE strategy LIKE 'nags%'
+        GROUP BY strategy
+        ORDER BY strategy
+        """
+    )
+
+    # Pair the win leg with its place leg (same horse, same day).
+    ew_sql = text(
+        """
+        SELECT w.selection_name                       AS horse,
+               date(w.placed_at)                      AS d,
+               w.result                               AS win_res,
+               COALESCE(w.profit_loss, 0)             AS win_pl,
+               p.result                               AS plc_res,
+               COALESCE(p.profit_loss, 0)             AS plc_pl
+        FROM bets w
+        JOIN bets p
+          ON p.selection_name = w.selection_name
+         AND date(p.placed_at) = date(w.placed_at)
+         AND p.strategy = 'nags_place'
+        WHERE w.strategy = 'nags_back'
+          AND w.result IN ('WON','LOST')
+          AND p.result IN ('WON','LOST')
+        ORDER BY d DESC
+        """
+    )
+
+    async with db.session() as session:
+        rows = (await session.execute(per_strategy_sql)).fetchall()
+        ew_rows = (await session.execute(ew_sql)).fetchall()
+
+    if not rows:
+        await update.message.reply_text("No Nags bets recorded yet.")
+        return
+
+    msg = "🐴 *Nags Strategy Audit*\n\n"
+    for r in rows:
+        mode = "PAPER" if r.is_paper else "🔴 LIVE"
+        decided = (r.won or 0) + (r.lost or 0)
+        sr = f"{(r.won or 0) / decided * 100:.1f}%" if decided else "n/a"
+        roi = f"{(r.net_pl or 0) / r.staked * 100:+.1f}%" if r.staked else "n/a"
+        msg += (
+            f"*{r.strategy}* ({mode})\n"
+            f"  P&L: £{r.net_pl:+.2f} | ROI: {roi}\n"
+            f"  {r.won}W-{r.lost}L ({sr}) | {r.void} void | {decided} decided\n\n"
+        )
+
+    if ew_rows:
+        win_only = sum(r.win_pl for r in ew_rows)
+        each_way = sum(r.win_pl + r.plc_pl for r in ew_rows)
+        placed = sum(1 for r in ew_rows if r.plc_res == "WON")
+        msg += (
+            f"*Each-way comparison* ({len(ew_rows)} paired 5/1+ picks)\n"
+            f"  Win-only:  £{win_only:+.2f}\n"
+            f"  Each-way:  £{each_way:+.2f}  (place leg paid {placed}x)\n"
+            f"  EW delta:  £{each_way - win_only:+.2f}\n\n"
+            f"_Place leg is PAPER. Positive delta over a real sample is the\n"
+            f"case for taking EW live._"
+        )
+    else:
+        msg += (
+            "*Each-way comparison*\n"
+            "  No settled win/place pairs yet — nags_place only fires on\n"
+            "  picks at 5/1 or longer, in races with 5+ runners."
+        )
+
+    await update.message.reply_text(msg, parse_mode="Markdown")

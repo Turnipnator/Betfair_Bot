@@ -49,6 +49,9 @@ class MarketRepository:
             # Update event_id if we have it now
             if hasattr(market, 'event_id') and market.event_id:
                 record.event_id = market.event_id
+            # Backfill once the MarketBook reveals it (catalogue never does).
+            if getattr(market, 'number_of_winners', None) is not None:
+                record.number_of_winners = market.number_of_winners
         else:
             # Create new
             record = MarketRecord(
@@ -63,6 +66,7 @@ class MarketRepository:
                 status=market.status.value,
                 total_matched=market.total_matched,
                 event_id=getattr(market, 'event_id', None),
+                number_of_winners=getattr(market, 'number_of_winners', None),
             )
             self.session.add(record)
 

@@ -122,12 +122,26 @@ class RacingResultsService:
         date (subsequent lookups for that date are served from cache), so call
         it from a thread executor rather than directly on the event loop.
         """
+        outcome, _pos = self.lookup_position(horse_name, race_date)
+        return outcome
+
+    def lookup_position(
+        self, horse_name: str, race_date: date
+    ) -> tuple[RaceOutcome, Optional[int]]:
+        """Like :meth:`lookup` but also returns the finishing position.
+
+        Place bets settle on ``position <= places``, which the plain WON/LOST
+        outcome cannot express. Position is None whenever the horse did not
+        record a numeric finishing position (non-runner, absent, no data).
+
+        Blocking HTTP on the first call for a date — call via an executor.
+        """
         races = self._fetch_day(race_date)
         if races is None:
-            return RaceOutcome.NO_DATA
+            return RaceOutcome.NO_DATA, None
         if not races:
             # API returned an empty day - results genuinely not published yet.
-            return RaceOutcome.NO_DATA
+            return RaceOutcome.NO_DATA, None
 
         target = _norm_horse(horse_name)
         for race in races:
@@ -136,13 +150,13 @@ class RacingResultsService:
                     continue
                 pos = str(runner.get("position", "")).strip()
                 if pos == "1":
-                    return RaceOutcome.WON
+                    return RaceOutcome.WON, 1
                 if pos.isdigit() and int(pos) > 0:
-                    return RaceOutcome.LOST
+                    return RaceOutcome.LOST, int(pos)
                 # Empty / "NR" / non-numeric position -> non-runner.
-                return RaceOutcome.NON_RUNNER
+                return RaceOutcome.NON_RUNNER, None
 
-        return RaceOutcome.ABSENT
+        return RaceOutcome.ABSENT, None
 
 
 # Module-level singleton - import this.

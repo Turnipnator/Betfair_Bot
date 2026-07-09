@@ -25,6 +25,7 @@ from src.strategies.arbitrage import (
 from src.strategies.horse_racing import (
     NagsBackStrategy,
     NagsLayFavStrategy,
+    NagsPlaceStrategy,
 )
 
 __all__ = [
@@ -50,4 +51,5 @@ __all__ = [
     # Horse racing (Nags)
     "NagsBackStrategy",
     "NagsLayFavStrategy",
+    "NagsPlaceStrategy",
 ]

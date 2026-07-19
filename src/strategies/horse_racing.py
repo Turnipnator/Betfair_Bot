@@ -157,12 +157,21 @@ class NagsReader:
         for row in rows:
             course = _course_from_race_name(row["race_name"])
             if not course:
-                # No "Course - " prefix, can't safely match to Betfair.
-                logger.debug(
-                    "Skipping Nags pick with unparseable race_name",
-                    race_name=row["race_name"],
-                    horse=row["horse"],
-                )
+                # No "Course - " prefix, can't safely match to Betfair, so the
+                # pick is dropped before any strategy sees it. Raised from
+                # debug to warning 19 Jul 2026 — this is the earliest and
+                # quietest place a real bet can vanish.
+                # Deduped: picks are reloaded on a 120s TTL across three
+                # strategy instances, so an undeduped warning here would fire
+                # ~90x/hour for one bad row.
+                if _tracker.warn_once(f"noCourse:{row['horse']}:{row['race_name']}"):
+                    logger.warning(
+                        "Nags pick dropped — unparseable race_name, cannot "
+                        "resolve course (bet SKIPPED)",
+                        race_name=row["race_name"],
+                        horse=row["horse"],
+                        selection_type=row["selection_type"],
+                    )
                 continue
             picks.append(
                 NagsPick(
@@ -212,6 +221,10 @@ class _NagsDailyTracker:
         # blocked nags_lay_fav 100% of the time, since nags_back is evaluated
         # first and claims essentially every pick-race.
         self._markets_bet: set[tuple[str, str]] = set()
+        # Keys already warned about today. evaluate() runs once per market per
+        # scan cycle, so an unresolvable pick would otherwise emit the same
+        # warning hundreds of times a day and train us to ignore it.
+        self._warned: set[str] = set()
 
     @staticmethod
     def _group(strategy: str) -> tuple[str, int]:
@@ -223,7 +236,20 @@ class _NagsDailyTracker:
             self._date = today
             self._bets_today.clear()
             self._markets_bet.clear()
+            self._warned.clear()
             logger.info("Nags daily counters reset")
+
+    def warn_once(self, key: str) -> bool:
+        """True the first time `key` is seen today, False thereafter.
+
+        Used to surface a silent bet-skip exactly once per day instead of
+        once per scan cycle.
+        """
+        self._maybe_reset()
+        if key in self._warned:
+            return False
+        self._warned.add(key)
+        return True
 
     def can_bet(self, strategy: str, market_id: str) -> bool:
         self._maybe_reset()
@@ -464,11 +490,28 @@ class NagsBackStrategy(_NagsStrategyBase):
         for pick in picks_sorted:
             runner = _match_runner_to_pick(market, pick)
             if runner is None:
-                logger.debug(
-                    "Nags pick not found in runners",
-                    horse=pick.horse,
-                    market=market.market_name,
-                )
+                # A pick reached this market on (course, race_time) but its
+                # horse is not in the field. Two causes: a genuine non-runner
+                # (benign), or a Nags race-integrity fault writing a pick under
+                # the wrong race — which silently DROPS A REAL BET. Was
+                # logger.debug and therefore invisible at the live log level;
+                # raised to warning 19 Jul 2026 after a cross-race next_best
+                # was found on the Nags card (Illinois filed under Stratford
+                # 15:58 while running Curragh 16:25). Nags CHECK 0b now blocks
+                # that at source; this is the downstream tripwire.
+                if _tracker.warn_once(
+                    f"nomatch:{self.name}:{market.market_id}:{pick.horse}"
+                ):
+                    logger.warning(
+                        "Nags pick has no matching runner — bet SKIPPED "
+                        "(non-runner, or pick filed under the wrong race)",
+                        horse=pick.horse,
+                        selection_type=pick.selection_type,
+                        pick_course=pick.course,
+                        pick_race_time=pick.race_time,
+                        market=market.market_name,
+                        venue=market.venue,
+                    )
                 continue
             if runner.status != "ACTIVE":
                 continue
@@ -550,11 +593,20 @@ class NagsLayFavStrategy(_NagsStrategyBase):
 
         pick_runner = _match_runner_to_pick(market, primary)
         if pick_runner is None:
-            logger.debug(
-                "Nags pick not in runners, can't compare to fav",
-                horse=primary.horse,
-                market=market.market_name,
-            )
+            # Same tripwire as NagsBackStrategy above — see that comment.
+            if _tracker.warn_once(
+                f"nomatch:{self.name}:{market.market_id}:{primary.horse}"
+            ):
+                logger.warning(
+                    "Nags pick has no matching runner — lay SKIPPED "
+                    "(non-runner, or pick filed under the wrong race)",
+                    horse=primary.horse,
+                    selection_type=primary.selection_type,
+                    pick_course=primary.course,
+                    pick_race_time=primary.race_time,
+                    market=market.market_name,
+                    venue=market.venue,
+                )
             return None
 
         # Nags picked the favourite — no disagreement, no edge.

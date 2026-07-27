@@ -49,15 +49,20 @@ BACK_FLAT_STAKE = 5.0
 LAY_LIABILITY_CAP = 5.0
 MIN_SECONDS_TO_OFF = 300  # don't bet inside the last 5 minutes
 
-# nags_place (the each-way place leg) filters.
+# nags_place (the each-way place leg) filters — the actual CLAUDE.md EW rule:
+# E/W when (8+ runners AND 3/1+ odds), and HANDICAPS are always E/W regardless
+# of field size / odds. The win price is read from the Nags odds_guide (the
+# morning price the rubric was applied to), NOT the live place-market price —
+# a PLACE market prices the place, so it can't reveal the horse's WIN odds.
 #
-# CLAUDE.md: "anything 5/1 or over to be each way". 5/1 == 6.0 decimal, read
-# from the Nags odds_guide (the morning price the rubric was applied to), not
-# from the live place-market price — the place market prices the PLACE, not
-# the WIN, so it cannot tell us whether the horse is a 5/1-plus shot.
-EACH_WAY_MIN_WIN_ODDS = 6.0
+# WIDENED 27 Jul 2026 (was 6.0 / 5-1-only, non-handicap-blind): the old floor
+# missed the SHORTER-priced picks, which is exactly where most of our places
+# come from (measured 21.8% place rate). odds are decimal (3/1 == 4.0).
+EACH_WAY_MIN_WIN_ODDS = 4.0        # 3/1 decimal — non-handicap odds floor
+EACH_WAY_MIN_RUNNERS_NONHCAP = 8   # non-handicap field-size floor
 PLACE_FLAT_STAKE = 5.0  # mirrors BACK_FLAT_STAKE: an EW bet stakes each leg
-# Betfair offers no place pool below 5 runners.
+# Betfair offers no place pool below 5 runners — also the floor for a
+# handicap's "always E/W" clause (no place market, no place leg).
 PLACE_MIN_RUNNERS = 5
 # nags_place gets its OWN daily cap. It is paper-only and must never consume
 # a slot that the live nags_back would otherwise use.
@@ -83,13 +88,16 @@ HORSE_RACING_STRATEGIES: frozenset[str] = frozenset({
 #
 # nags_lay_fav stays paper: -£1.35 on only 5 decided bets, no evidence base.
 #
-# nags_place is the each-way place leg, running in paper alongside the LIVE
-# nags_back win leg so the EW variant can be audited before it risks money.
-# The 8-week paper record validates flat WIN bets ONLY — it says nothing
-# about EW, so EW must earn its own record first.
+# nags_place (the each-way place leg) went LIVE 2026-07-27 at Paul's explicit
+# direction, together with widening its trigger from 5/1-only to the real
+# CLAUDE.md EW rule (3/1+ AND 8+ runners; handicaps always E/W) so it covers
+# the shorter-priced picks that actually place. Its own daily cap
+# (DAILY_PLACE_BET_CAP) plus the PLACE market-type gate keep it clear of the
+# live nags_back WIN slots. The prior paper record was thin and longshot-only
+# (0/4); the case for going live is the widened coverage + the measured 21.8%
+# place rate, NOT that sample — so WATCH the first weeks closely.
 FORCE_PAPER_STRATEGIES: frozenset[str] = frozenset({
     "nags_lay_fav",
-    "nags_place",
 })
 
 # nags_lay_fav (B1a) filters.
@@ -116,6 +124,11 @@ class NagsPick:
     selection_type: str
     odds_guide: Optional[str]
     score: Optional[float]
+    # Full Nags race_name ("<Course> - <Race>"). Retained so the EW place leg
+    # can detect handicaps ("handicap" in the name) — CLAUDE.md makes handicaps
+    # always each-way. Defaulted for backward compatibility with any caller
+    # that predates this field.
+    race_name: Optional[str] = None
 
 
 class NagsReader:
@@ -181,6 +194,7 @@ class NagsReader:
                     selection_type=row["selection_type"],
                     odds_guide=row["odds_guide"],
                     score=row["score"],
+                    race_name=row["race_name"],
                 )
             )
         return picks
@@ -384,6 +398,28 @@ def _parse_odds_guide(odds_guide: Optional[str]) -> Optional[float]:
         if den > 0:
             return 1.0 + num / den
     return None
+
+
+def _ew_place_eligible(
+    is_handicap: bool, num_active: int, win_odds: Optional[float]
+) -> bool:
+    """Is this pick each-way eligible per the CLAUDE.md rule?
+
+    HANDICAPS are always E/W regardless of field size or odds. Otherwise E/W
+    only when the field is 8+ runners AND the win price is 3/1 or bigger
+    (win_odds is DECIMAL; EACH_WAY_MIN_WIN_ODDS == 4.0 == 3/1). A None win
+    price fails the non-handicap test (can't confirm 3/1) but never blocks a
+    handicap. Assumes a place market exists — num_active >= PLACE_MIN_RUNNERS
+    is enforced separately by the caller.
+    """
+    if is_handicap:
+        return True
+    if win_odds is None:
+        return False
+    return (
+        num_active >= EACH_WAY_MIN_RUNNERS_NONHCAP
+        and win_odds >= EACH_WAY_MIN_WIN_ODDS
+    )
 
 
 class _NagsStrategyBase(BaseStrategy):
@@ -724,22 +760,20 @@ class NagsPlaceStrategy(_NagsStrategyBase):
         # must be the SAME horse nags_back backed or it is not an EW leg at
         # all. (9 Jul 2026: a `continue` here skipped Thunder Call at 7/2 and
         # placed on Calico Blue, a race_nb nags_back never touched.)
+        # CLAUDE.md each-way rule (see _ew_place_eligible). `active`
+        # (>= PLACE_MIN_RUNNERS, guarded above) is the field on this market.
+        is_handicap = "handicap" in (pick.race_name or "").lower()
+        num_active = len(active)
         win_odds = _parse_odds_guide(pick.odds_guide)
-        if win_odds is None:
-            # Can't establish the win price -> can't apply the 5/1 rule.
+        if not _ew_place_eligible(is_handicap, num_active, win_odds):
+            # Non-handicap with <8 runners or shorter than 3/1 (or a
+            # non-handicap with no parseable win price) -> win-only, no leg.
             logger.debug(
-                "No parseable odds_guide for place leg",
-                horse=pick.horse,
-                odds_guide=pick.odds_guide,
-            )
-            return None
-        if win_odds < EACH_WAY_MIN_WIN_ODDS:
-            # Shorter than 5/1 -> win-only. No place leg in this race.
-            logger.debug(
-                "Nags pick shorter than EW threshold, no place leg",
+                "Nags pick not EW-eligible, no place leg",
                 horse=pick.horse,
                 win_odds=win_odds,
-                threshold=EACH_WAY_MIN_WIN_ODDS,
+                num_active=num_active,
+                is_handicap=is_handicap,
             )
             return None
 
@@ -758,7 +792,7 @@ class NagsPlaceStrategy(_NagsStrategyBase):
             event_name=market.event_name,
             reason=(
                 f"EW place leg: Nags {pick.selection_type} @ {pick.odds_guide} "
-                f"(win {win_odds:.2f} >= {EACH_WAY_MIN_WIN_ODDS}); "
+                f"({'handicap' if is_handicap else f'{num_active}r win {win_odds:.2f}'}); "
                 f"{market.number_of_winners} places"
             ),
             market_start_time=market.start_time,

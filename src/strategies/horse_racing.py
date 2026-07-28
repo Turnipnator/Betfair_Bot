@@ -88,16 +88,23 @@ HORSE_RACING_STRATEGIES: frozenset[str] = frozenset({
 #
 # nags_lay_fav stays paper: -£1.35 on only 5 decided bets, no evidence base.
 #
-# nags_place (the each-way place leg) went LIVE 2026-07-27 at Paul's explicit
-# direction, together with widening its trigger from 5/1-only to the real
-# CLAUDE.md EW rule (3/1+ AND 8+ runners; handicaps always E/W) so it covers
-# the shorter-priced picks that actually place. Its own daily cap
-# (DAILY_PLACE_BET_CAP) plus the PLACE market-type gate keep it clear of the
-# live nags_back WIN slots. The prior paper record was thin and longshot-only
-# (0/4); the case for going live is the widened coverage + the measured 21.8%
-# place rate, NOT that sample — so WATCH the first weeks closely.
+# nags_back reverted to PAPER 2026-07-28: it bled -£88.37 over 34 live bets
+# (5 wins, -52% ROI). The Nags system is breakeven-at-best at BOG and the
+# exchange gives no BOG, so flat-£5 win-only betting is a structural slow loss
+# + variance. Monitoring in paper; only re-enable live on a PROVEN edge.
+#
+# nags_place (the EW place leg) STAYS LIVE at Paul's direction (he believes the
+# place market is where the edge is). NB: with nags_back now on paper, this is
+# effectively a PLACE-ONLY real-money bet on the picks (win side is paper). Its
+# live sample is still tiny (-£6.38 over 4, one place win Abduction +£8.62), so
+# it's a belief not yet data — WATCH it. Trigger = CLAUDE.md EW rule (3/1+ AND
+# 8+ runners; handicaps always). Independent of nags_back (own DAILY_PLACE_BET_CAP,
+# own PLACE market-type gate), so nags_back going paper does not affect it.
+#
+# nags_lay_fav stays paper (no evidence base).
 FORCE_PAPER_STRATEGIES: frozenset[str] = frozenset({
     "nags_lay_fav",
+    "nags_back",
 })
 
 # nags_lay_fav (B1a) filters.

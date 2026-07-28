@@ -45,8 +45,9 @@ check("nonhcap 7r @ 5/1 -> no (field<8)", _ew_place_eligible(False, 7, 6.0), Fal
 check("nonhcap 8r no odds -> no (can't confirm 3/1)", _ew_place_eligible(False, 8, None), False)
 check("nonhcap 20r @ 5/1 -> yes", _ew_place_eligible(False, 20, 6.0), True)
 
-print("live/paper switch")
+print("live/paper switch (28 Jul: nags_back reverted to paper, nags_place stays live)")
 check("nags_place is LIVE (not forced-paper)", "nags_place" in FORCE_PAPER_STRATEGIES, False)
+check("nags_back reverted to PAPER (bled -£88)", "nags_back" in FORCE_PAPER_STRATEGIES, True)
 check("nags_lay_fav still forced-paper", "nags_lay_fav" in FORCE_PAPER_STRATEGIES, True)
 
 print(f"\nRESULT: {PASS}/{PASS + FAIL} passed")

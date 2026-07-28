@@ -60,7 +60,10 @@ MIN_SECONDS_TO_OFF = 300  # don't bet inside the last 5 minutes
 # come from (measured 21.8% place rate). odds are decimal (3/1 == 4.0).
 EACH_WAY_MIN_WIN_ODDS = 4.0        # 3/1 decimal — non-handicap odds floor
 EACH_WAY_MIN_RUNNERS_NONHCAP = 8   # non-handicap field-size floor
-PLACE_FLAT_STAKE = 5.0  # mirrors BACK_FLAT_STAKE: an EW bet stakes each leg
+PLACE_FLAT_STAKE = 2.0  # cut 5.0->2.0 on 28 Jul to bleed slower while the
+# place-only edge is unproven. £2 is the Betfair Exchange GBP minimum back
+# stake — watch the first live place bet is MATCHED, not rejected as
+# below-minimum (raise back toward 3-5 if the exchange bounces it).
 # Betfair offers no place pool below 5 runners — also the floor for a
 # handicap's "always E/W" clause (no place market, no place leg).
 PLACE_MIN_RUNNERS = 5

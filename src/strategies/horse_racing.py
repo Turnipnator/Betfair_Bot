@@ -148,6 +148,18 @@ class NagsReader:
     name into ``race_name`` as ``"<Course> - <Race>"``. We don't JOIN
     against ``meetings``; we just filter by ``date(created_at)`` and
     parse the course back out of ``race_name``.
+
+    ``superseded_at IS NULL`` (added 1 Aug 2026) keeps the exchange off a
+    REPLACED card. Nags' daily cap was enforced per ``/run``, so a second run
+    used to append a whole second card at full stakes -- 1 Aug 2026 issued two
+    NAPs across Thirsk and Goodwood. A later run now supersedes the earlier
+    picks (they are marked, never deleted, so the ledger keeps them for audit);
+    without this filter we would still back the withdrawn card.
+
+    Requires ``selections.superseded_at``, added by Nags' ``init_db`` migration
+    -- deploy Nags FIRST. If the column is missing the query raises, the
+    ``sqlite3.Error`` handler below logs a warning and returns no picks, so the
+    failure is loud-ish and fail-closed (no bets) rather than wrong bets.
     """
 
     def __init__(self, db_path: Path = NAGS_DB_PATH) -> None:
@@ -170,6 +182,7 @@ class NagsReader:
                            odds_guide, score
                     FROM selections
                     WHERE date(created_at) = date('now')
+                      AND superseded_at IS NULL
                     """
                 ).fetchall()
         except sqlite3.Error as e:

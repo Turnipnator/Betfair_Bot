@@ -156,6 +156,12 @@ class NagsReader:
     picks (they are marked, never deleted, so the ledger keeps them for audit);
     without this filter we would still back the withdrawn card.
 
+    ``source = 'bot'`` (added 2 Aug 2026) keeps the exchange off MANUALLY logged
+    picks. Claude's own cards are now written to the same table so they can be
+    settled and measured, but no strategy produced them and they must never be
+    staked. ``source IS NULL`` is tolerated so an un-migrated DB still bets the
+    bot's own picks rather than silently going quiet.
+
     Requires ``selections.superseded_at``, added by Nags' ``init_db`` migration
     -- deploy Nags FIRST. If the column is missing the query raises, the
     ``sqlite3.Error`` handler below logs a warning and returns no picks, so the
@@ -183,6 +189,7 @@ class NagsReader:
                     FROM selections
                     WHERE date(created_at) = date('now')
                       AND superseded_at IS NULL
+                      AND (source IS NULL OR source = 'bot')
                     """
                 ).fetchall()
         except sqlite3.Error as e:

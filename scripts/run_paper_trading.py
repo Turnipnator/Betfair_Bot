@@ -984,16 +984,28 @@ class PaperTradingEngine:
             for bet in stale_bets:
                 # Get event name from database to look up result
                 event_name = None
+                market_sport = None
                 try:
                     async with db.session() as session:
                         market_repo = MarketRepository(session)
                         market = await market_repo.get(bet.market_id)
                         if market:
                             event_name = market.event_name
+                            market_sport = market.sport
                             # Set on bet object so notification includes match name
                             bet.event_name = event_name
                 except Exception:
                     pass
+
+                # This settler resolves football results from football-data.co.uk.
+                # Horse-racing (nags_*) paper bets settle separately via the
+                # Racing API in _settle_horse_racing_bets, so feeding their event
+                # names (e.g. "Curragh 19th Jul") to the football team-name parser
+                # only spams "Could not parse teams" warnings and can never
+                # resolve. Skip anything that isn't football.
+                if market_sport is not None and market_sport != Sport.FOOTBALL.value:
+                    skipped_count += 1
+                    continue
 
                 if not event_name:
                     logger.info(

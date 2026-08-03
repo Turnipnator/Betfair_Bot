@@ -320,13 +320,21 @@ class BetfairClient:
                 None,
                 lambda: self._client.betting.list_market_catalogue(
                     filter=mf,
+                    # RUNNER_DESCRIPTION is deliberately omitted here. This call
+                    # only needs the market id, sport, competition and start time
+                    # — scan_markets uses the results solely to collect market_ids
+                    # (and competition names for UEFA filtering), then discards
+                    # them and re-fetches full runner data via get_market_prices.
+                    # Requesting runner metadata for up to 200 (runner-heavy)
+                    # horse-racing markets every scan is a large payload that was
+                    # driving list_market_catalogue read timeouts; dropping it
+                    # slashes the payload with no behaviour change.
                     market_projection=[
                         "COMPETITION",
                         "EVENT",
                         "EVENT_TYPE",
                         "MARKET_DESCRIPTION",
                         "MARKET_START_TIME",
-                        "RUNNER_DESCRIPTION",
                     ],
                     max_results=filter.max_results,
                 ),

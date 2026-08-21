@@ -112,22 +112,64 @@ check the code, not the prose.
 ### `nags_back` went live 9 Jul 2026 and came back off 28 Jul — read this before relighting it
 
 It cleared non-negotiable rule #1 on *duration* (8 weeks paper, 14 May – 8 Jul)
-but the edge was **never proven**:
+but the edge was **never proven**. The go-live decision rested on this:
 
 ```
 +£89.15 over 65 decided bets, 24.6% strike
-  minus Priapos (15.5)          → +£20.27
+  minus Priapos (15.5)            → +£20.27
   minus Priapos AND Bearish (8.2) → -£13.93
 ```
 
 Two horses carried the entire result — the signature of variance, not edge.
-Live, it bled **-£88.37 over 34 bets** and was reverted to paper. That is the
-paper record's two-horse fragility showing up as real money, exactly as the
-arithmetic above warned.
+Live, it bled **-£93.37 over 35 bets (5 winners)** and was reverted to paper.
+That is the paper record's two-horse fragility showing up as real money,
+exactly as the arithmetic above warned.
+
+#### The corrected record (21 Aug 2026, post-backfill)
+
+Until 21 Aug this strategy's paper record was missing **37 of its own 136
+results (27%)** — the results-cache bug above was voiding them, and it dropped
+late-afternoon races far more often than morning ones, so the surviving half
+was not a random sample. The backfill restored 55 bets across all three Nags
+strategies. `nags_back`'s complete picture:
+
+```
+nags_back  PAPER  15 May – 20 Aug 2026
++£84.77 over 136 decided bets, 20.6% strike (28W / 108L)
+
+  minus top 1 (Forever Penywern, 17.5) →   +£6.39
+  minus top 2 (+ Priapos, 15.5)        →  -£62.48
+  minus top 3 (+ Bearish, 8.2)         →  -£96.68
+  minus top 5                          → -£158.43
+```
+
+**The backfill did not vindicate this strategy.** Headline P&L quadrupled
+(+£20.98 → +£84.77), but the whole increase and more is one recovered 17.5
+winner. Priapos and Bearish — the two horses flagged in the original 65-bet
+note — are still in the top three. Strip the single best horse and 136 bets
+of paper trading is break-even.
+
+The strike rate barely moved (24.6% → 20.6%, noise at this sample size), so
+selection quality is not what changed. It is the tail that moves the total,
+and a tail that thin is not an edge you can stake.
+
+What the backfill bought is a record that is *complete and trustworthy*, and
+a trustworthy record says the same thing the fragmentary one did with twice
+the sample behind it. Read this section before proposing a relight.
+
+Sibling strategies as of 21 Aug, for comparison:
+
+| Strategy | Mode | Decided | Won | P&L |
+|----------|------|---------|-----|-----|
+| `nags_back` | paper | 136 | 28 | +£84.77 |
+| `nags_lay_fav` | paper | 44 | 26 | -£25.52 |
+| `nags_place` | 🔴 live | 43 | 17 | -£10.76 |
 
 If it is ever relit, it goes at **the same flat £5 WIN stake the paper run
 tested** — not scaled up, not restructured — so the records stay comparable.
 Do not raise the stake or change the bet shape without a fresh paper trade.
+And note that every bet in the corrected record predates the settlement fix:
+a clean forward sample is worth more than re-reading this one.
 
 ### Each-way is two bets, not one
 

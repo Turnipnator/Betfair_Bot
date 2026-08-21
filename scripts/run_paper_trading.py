@@ -1204,11 +1204,8 @@ class PaperTradingEngine:
                             outcome="WON" if selection_won else "LOST",
                             pnl=f"£{pnl:+.2f}",
                         )
-                elif outcome == RaceOutcome.NON_RUNNER or (
-                    outcome == RaceOutcome.ABSENT and age_min > 48 * 60
-                ):
-                    # Genuine non-runner, or never appeared in results after 48h
-                    # (almost always a non-runner; logged so name mismatches show).
+                elif outcome == RaceOutcome.NON_RUNNER:
+                    # The API positively flagged this horse as a non-runner.
                     if self._simulator.void_bet(bet.id):
                         voided += 1
                         await self._persist_hr_settlement(bet)
@@ -1220,11 +1217,24 @@ class PaperTradingEngine:
                             age_h=f"{age_min / 60:.0f}h",
                         )
                 else:
-                    # NO_DATA, or ABSENT but still recent — retry next cycle.
+                    # NO_DATA, or ABSENT — retry next cycle, however old.
+                    #
+                    # ABSENT used to void at 48h on the theory that a horse
+                    # missing from the results was "almost always a non-runner".
+                    # It wasn't: a partial-day cache (fixed in racing_results)
+                    # made later races permanently invisible, and the rule then
+                    # voided live-confirmed runners — Badri finished 2nd and was
+                    # booked as a void. Absence means "we couldn't find it", not
+                    # "it didn't run", and voiding on it deletes the data point
+                    # instead of flagging it. Same principle as the place-count
+                    # guard: never settle on a guess. Stays pending and shouts.
                     pending += 1
                     if outcome == RaceOutcome.ABSENT:
-                        logger.info(
-                            "Horse racing result not found yet (retrying)",
+                        stuck = age_min > 48 * 60
+                        log = logger.warning if stuck else logger.info
+                        log(
+                            "Horse racing result not found"
+                            + (" - stuck >48h, needs a look" if stuck else " yet (retrying)"),
                             bet_id=bet.bet_ref,
                             horse=bet.selection_name[:30] if bet.selection_name else "N/A",
                             race_date=race_date.isoformat(),
@@ -1328,10 +1338,32 @@ class PaperTradingEngine:
                 open_bets=len(bets_with_ref),
             )
 
-            # Get cleared orders from Betfair (last 7 days)
-            # Extended window ensures bets are settled even after restarts
-            # where in-memory settlement succeeded but DB write failed
-            cleared_orders = await betfair_client.get_cleared_orders(from_hours=168)
+            # Look back far enough to cover the OLDEST bet still open, not a
+            # fixed window. A flat 7 days stranded a live nags_back bet for 33
+            # days: it settled on Betfair the day it was placed, the DB write
+            # was missed, and by the next successful reconciliation it had
+            # already aged out of the window — so it could never settle again.
+            # Betfair serves cleared orders well beyond 90 days; cap there
+            # because a bet older than that is a data problem, not a settlement
+            # one, and the >7d warning below surfaces it.
+            oldest = min(
+                (b.placed_at for b in bets_with_ref if b.placed_at), default=None
+            )
+            from_hours = 168
+            if oldest is not None:
+                if oldest.tzinfo is None:
+                    oldest = oldest.replace(tzinfo=timezone.utc)
+                age_h = (datetime.now(timezone.utc) - oldest).total_seconds() / 3600
+                # +24h of slack so the oldest bet sits inside the window.
+                from_hours = int(min(max(168, age_h + 24), 90 * 24))
+                if from_hours > 168:
+                    logger.warning(
+                        "Reconciliation window widened for an aged open bet",
+                        oldest_bet_age_days=f"{age_h / 24:.1f}",
+                        window_days=f"{from_hours / 24:.1f}",
+                    )
+
+            cleared_orders = await betfair_client.get_cleared_orders(from_hours=from_hours)
 
             if not cleared_orders:
                 logger.warning("Reconciliation: no cleared orders from Betfair")

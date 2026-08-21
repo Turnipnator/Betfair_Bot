@@ -101,14 +101,18 @@ the only interface.
 
 | Strategy | Market | Mode | Stake | What it does |
 |----------|--------|------|-------|--------------|
-| `nags_back` | `WIN` | 🔴 **LIVE** (9 Jul 2026) | £5 flat | Backs the Nags pick (NAP > NB > selection > race_nb) |
+| `nags_back` | `WIN` | PAPER (reverted 28 Jul 2026) | £5 flat | Backs the Nags pick (NAP > NB > selection > race_nb) |
 | `nags_lay_fav` | `WIN` | PAPER | £5 liability cap | Lays the 2.0–4.0 favourite when Nags picked a longer horse |
-| `nags_place` | `PLACE` | PAPER | £5 flat | Each-way place leg on picks at 5/1+ |
+| `nags_place` | `PLACE` | 🔴 **LIVE** (27 Jul 2026) | £2 flat | Each-way place leg (handicaps always; non-handicaps 8+ runners AND 3/1+) |
 
-### `nags_back` went live on 9 July 2026 — read this before touching it
+The live/paper truth is `FORCE_PAPER_STRATEGIES` in `src/strategies/horse_racing.py`,
+locked by `tests/test_nags_place_ew.py`. This table has been wrong before —
+check the code, not the prose.
+
+### `nags_back` went live 9 Jul 2026 and came back off 28 Jul — read this before relighting it
 
 It cleared non-negotiable rule #1 on *duration* (8 weeks paper, 14 May – 8 Jul)
-but the edge is **not proven**:
+but the edge was **never proven**:
 
 ```
 +£89.15 over 65 decided bets, 24.6% strike
@@ -116,27 +120,29 @@ but the edge is **not proven**:
   minus Priapos AND Bearish (8.2) → -£13.93
 ```
 
-Two horses carry the entire result. That is the signature of variance, not of
-demonstrated edge. It went live at **exactly the flat £5 WIN stake the paper
-run tested** — not scaled up, not restructured — precisely so the live record
-stays comparable to the paper record. Do not raise the stake or change the bet
-shape without a fresh paper trade. Real bankroll is ~£300; the 6-bet daily cap
-means £30 max daily exposure, inside the 15% daily-loss threshold.
+Two horses carried the entire result — the signature of variance, not edge.
+Live, it bled **-£88.37 over 34 bets** and was reverted to paper. That is the
+paper record's two-horse fragility showing up as real money, exactly as the
+arithmetic above warned.
+
+If it is ever relit, it goes at **the same flat £5 WIN stake the paper run
+tested** — not scaled up, not restructured — so the records stay comparable.
+Do not raise the stake or change the bet shape without a fresh paper trade.
 
 ### Each-way is two bets, not one
 
 **Betfair's exchange has no each-way bet.** `BetType` is `BACK`/`LAY` only. A
 bookmaker EW is one stake on the WIN and one on the PLACE, so EW here is
-emulated as `nags_back` (WIN, live) + `nags_place` (PLACE, paper) on the same
+emulated as `nags_back` (WIN, paper) + `nags_place` (PLACE, live) on the same
 horse at the same stake. Note the exchange place market is *independently
 priced* — there is no "1/5 the odds" fraction.
 
-`nags_place` fires only on picks at **5/1 or longer**, read from the Nags
-`odds_guide`, because a PLACE market prices the *place* and cannot tell you
-whether a horse is a 5/1 shot. It is paper-only: the 8-week record validates
-flat WIN bets and says nothing about EW. Audit the two legs side by side with
-`/nags`, which pairs them per horse and prints the EW-vs-win-only delta. A
-positive delta over a real sample is the case for taking EW live.
+`nags_place` eligibility follows the bookmaker EW rule, read from the Nags
+`odds_guide` and field size, because a PLACE market prices the *place* and
+cannot tell you whether a horse is a 3/1 shot: handicaps always qualify,
+non-handicaps need 8+ runners **and** 3/1 or longer. Audit the two legs side
+by side with `/nags`, which pairs them per horse and prints the EW-vs-win-only
+delta.
 
 ### Two guards that protect real money
 
@@ -166,6 +172,48 @@ can never exhaust the budget and lock the live win leg out of a real bet.
   `number_of_winners` only on `MarketBook`, so it is captured at bet time and
   persisted to `markets.number_of_winners`. If it is unknown the bet is left
   **pending, never settled on a guess** — a wrong place count fabricates P&L.
+
+#### A missing result is not a non-runner (fixed 21 Aug 2026)
+
+The same "never settle on a guess" rule that governs the place count was, for
+months, violated one branch above it. Three defects compounded:
+
+1. `_fetch_day` cached a day's results on the **first non-empty fetch**. The
+   Racing API publishes race by race through the afternoon, so a card fetched
+   mid-afternoon was cached part-run and never refreshed for the life of the
+   process. Later races on that date were invisible forever.
+2. `_norm_horse` compared names without stripping punctuation. Betfair drops
+   apostrophes ("Naanas Shadow"), the Racing API keeps them ("Naana's Shadow
+   (IRE)"), so those horses never matched.
+3. `_settle_horse_racing_bets` then read the resulting `ABSENT` as "almost
+   always a non-runner" and **voided the bet at 48h**.
+
+Together they deleted **56 Nags paper results, 18 of them winners**, including
+a £78 winner at 17.5. The void rate rose through the day exactly as the cache
+predicted — 14% for morning bets, 59% for late-afternoon. Proof it was a
+lookup failure and not genuine non-runners: 11 of the voided win legs had a
+**live** `nags_place` leg on the same horse that settled normally from
+Betfair, and three of those placed.
+
+The rules now:
+
+- **Only a finished day is cached.** Today's card is re-fetched every cycle,
+  because a day is not immutable until it is over.
+- **Pages are followed to `total`**, so a long festival card cannot be
+  silently truncated into apparent absence.
+- **`VOID` requires a positive `NON_RUNNER` flag.** `ABSENT` stays *pending*
+  at any age and warns past 48h. Absence means "we could not find it", never
+  "it did not run" — voiding on it destroys the data point instead of
+  flagging it.
+
+`scripts/backfill_wrongly_voided.py` re-resolves historical voids against a
+complete day fetch (dry-run by default). `tests/test_results_cache.py` locks
+all three fixes.
+
+Live HR bets reconcile over a window sized to the **oldest still-open bet**,
+not a flat 7 days. A flat window stranded a live bet for 33 days: it settled
+on Betfair the day it was placed, the DB write was missed, and by the next
+reconciliation it had already aged out — permanently unsettleable.
 
 ---
 

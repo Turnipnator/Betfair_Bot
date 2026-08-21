@@ -31,6 +31,14 @@ from src.models import (
 
 logger = get_logger(__name__)
 
+# Strategies that strike their bet after the event is under way. They have no
+# closing line to be measured against, so they are kept out of CLV capture —
+# see BetRepository.get_bets_for_clv_capture for the full reasoning.
+IN_PLAY_ENTRY_STRATEGIES: tuple[str, ...] = (
+    "lay_the_draw",  # enters at half-time
+    "ltd_hedge",     # hedges mid-match by definition
+)
+
 
 class MarketRepository:
     """Repository for market data."""
@@ -266,16 +274,30 @@ class BetRepository:
 
         Voided bets are excluded — CLV is meaningless for them.
 
-        Horse-racing (``nags_*``) bets are excluded too: a losing horse's
-        last_price_traded drifts toward Betfair's 1000.0 ceiling at the off,
-        so the CLV formula produces meaningless thousands-of-percent values
-        that falsely signal a huge edge. CLV is an exchange/football metric;
-        win/loss P&L is the real measure for the Nags strategies.
+        So are bets from strategies that enter **in-play**. CLV measures our
+        price against the closing line, which only exists for a bet struck
+        before the market turns over: once the event is running, the losing
+        side's last_price_traded drifts to Betfair's 1000.0 ceiling and the
+        formula reports thousands of percent that are just the result wearing
+        a CLV costume.
+
+        That bit the Nags strategies (a beaten horse hits 1000.0 at the off),
+        and it bit ``lay_the_draw`` identically — it enters at half-time, so
+        the "close" it captured was the dead post-match draw price. Its 13
+        bets averaged -8,905% CLV, with every worst reading on a *winner*:
+        perfectly anti-correlated with the outcome and therefore worthless as
+        a leading indicator. Excluded rather than approximated, because the
+        pre-off closing line those bets would need does not exist.
+
+        What is left — ``value_betting``, ``arbitrage`` — is struck pre-off,
+        where the closing line is real and CLV means what it claims to. For
+        the in-play strategies, win/loss P&L is the measure.
         """
         cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
         result = await self.session.execute(
             select(BetRecord)
             .where(BetRecord.placed_at >= cutoff)
+            .where(BetRecord.strategy.notin_(IN_PLAY_ENTRY_STRATEGIES))
             .where(~BetRecord.strategy.like("nags%"))
             .where(
                 or_(

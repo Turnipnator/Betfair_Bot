@@ -101,8 +101,8 @@ the only interface.
 
 | Strategy | Market | Mode | Stake | What it does |
 |----------|--------|------|-------|--------------|
-| `nags_back` | `WIN` | PAPER (reverted 28 Jul 2026) | £5 flat | Backs the Nags pick (NAP > NB > selection > race_nb) |
-| `nags_lay_fav` | `WIN` | PAPER | £5 liability cap | Lays the 2.0–4.0 favourite when Nags picked a longer horse |
+| `nags_back` | `WIN` | ⛔ **DISABLED** 1 Sep 2026 (paper since 28 Jul) | £5 flat | Backed the Nags pick (NAP > NB > selection > race_nb). Off `ENABLED_STRATEGIES`; code kept |
+| `nags_lay_fav` | `WIN` | ⛔ **DISABLED** 1 Sep 2026 (was paper) | £5 liability cap | Laid the 2.0–4.0 favourite when Nags picked a longer horse. Off `ENABLED_STRATEGIES`; code kept |
 | `nags_place` | `PLACE` | 🔴 **LIVE** (27 Jul 2026) | £2 flat | Each-way place leg (handicaps always; non-handicaps 8+ runners AND 3/1+) |
 
 The live/paper truth is `FORCE_PAPER_STRATEGIES` in `src/strategies/horse_racing.py`,
@@ -110,6 +110,23 @@ locked by `tests/test_nags_place_ew.py`. This table has been wrong before —
 check the code, not the prose.
 
 ### `nags_back` went live 9 Jul 2026 and came back off 28 Jul — read this before relighting it
+
+**Disabled 1 Sep 2026.** Removed from `ENABLED_STRATEGIES` on the VPS after the
+paper record collapsed: 41 consecutive losses from 9 Aug to 31 Aug (0 from 19
+since the 21 Aug note below), all confirmed against the Nags bot's own results
+table, so it was selection and not settlement. The 30-day strike rate was 9%
+against a 17% break-even. All-time: 33 won from 188 decided, -£93.60, of which
+the -£93.37 live loss (9–28 Jul) is the only real money. The code stays: the
+`/nags` audit, settlement scoping (`HORSE_RACING_STRATEGIES`) and the tests all
+reference it, and the historical bets carry its name. Relighting means adding it
+back to `ENABLED_STRATEGIES` and a `docker compose down && up -d` — and reading
+the rest of this section first.
+
+`nags_lay_fav` was binned the same day and the same way. It never left paper:
+28 won from 48 decided (58% strike against a 35% break-even, which sounds fine)
+but -£31.36, because the wins are small liability-capped lays and the losses
+are full stakes at 2.0–4.0. Last 30 days: 12 from 21, -£18.44. Only
+`nags_place` remains of the three, live at £2.
 
 It cleared non-negotiable rule #1 on *duration* (8 weeks paper, 14 May – 8 Jul)
 but the edge was **never proven**. The go-live decision rested on this:

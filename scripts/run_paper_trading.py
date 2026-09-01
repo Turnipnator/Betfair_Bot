@@ -899,7 +899,14 @@ class PaperTradingEngine:
             if runner.status == "REMOVED":
                 if self._simulator.void_bet(bet.id):
                     logger.info("Bet voided (non-runner)", bet_id=bet.bet_ref)
-                    await notifier.bet_settled(bet)
+                    # Persist exactly as the settled path below does (1 Sep
+                    # 2026). This branch used to void in MEMORY ONLY: the DB
+                    # row stayed MATCHED, the market stayed in the dedup set,
+                    # and the Racing API fallback never saw the bet because it
+                    # was no longer "open" in memory. Pure Mint (bet 560,
+                    # 31 Aug) sat MATCHED for that reason. The helper does the
+                    # notifier, the DB settle and the dedup discard.
+                    await self._persist_hr_settlement(bet)
                 else:
                     logger.warning(
                         "Failed to void bet (already settled?)",
@@ -1234,7 +1241,10 @@ class PaperTradingEngine:
                         log = logger.warning if stuck else logger.info
                         log(
                             "Horse racing result not found"
-                            + (" - stuck >48h, needs a look" if stuck else " yet (retrying)"),
+                            + (" - stuck >48h, needs a look: the results feed"
+                               " OMITS non-runners, so check Betfair runner"
+                               " status REMOVED and void by hand"
+                               if stuck else " yet (retrying)"),
                             bet_id=bet.bet_ref,
                             horse=bet.selection_name[:30] if bet.selection_name else "N/A",
                             race_date=race_date.isoformat(),

@@ -8,7 +8,7 @@ for use in the Poisson prediction model.
 import csv
 import io
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 import httpx
@@ -18,33 +18,100 @@ from config.logging_config import get_logger
 logger = get_logger(__name__)
 
 
-# Football-data.co.uk CSV URLs for current season (2025-26)
-LEAGUE_URLS = {
+# ---------------------------------------------------------------------------
+# Season handling
+#
+# football-data.co.uk publishes one CSV per league per season under a
+# four-digit code ("2627" = 2026/27), plus a few "new format" leagues as one
+# multi-season file with a Season column. Both used to be hard-coded here, so
+# the bot ran the whole of 2026/27 on 2025/26's numbers, and Denmark on
+# 2024/25's. The season is now derived from the date, and a young season is
+# blended with the one before it: in August the filters should not run on two
+# games' worth of noise, and in April they should not run on last year's table.
+# ---------------------------------------------------------------------------
+
+FOOTBALL_DATA_BASE = "https://www.football-data.co.uk"
+
+# A new season's files appear on the site from July. Until then "current"
+# still means the season that has just finished.
+SEASON_START_MONTH = 7
+
+# Prior-season weight falls linearly from 1.0 at zero games played to 0.0 at
+# this many, per home/away split. Ten is the compromise: enough games that the
+# current sample has stopped being noise, few enough that last season's form
+# is not still leaking into November.
+BLEND_FULL_GAMES = 10
+
+# Leagues published as a single multi-season file under /new/. Their Season
+# column is either "2026/2027" (split-year) or "2026" (calendar-year).
+NEW_FORMAT_LEAGUES = frozenset(
+    {"AUT", "DNK", "SWZ", "SWE", "NOR", "FIN", "IRL", "POL", "ROU", "RUS"}
+)
+
+# football-data.co.uk file codes for every league we load.
+LEAGUE_FILES: dict[str, str] = {
     # England
-    "E0": "https://www.football-data.co.uk/mmz4281/2526/E0.csv",  # Premier League
-    "E1": "https://www.football-data.co.uk/mmz4281/2526/E1.csv",  # Championship
+    "E0": "E0",  # Premier League
+    "E1": "E1",  # Championship
     # Scotland
-    "SC0": "https://www.football-data.co.uk/mmz4281/2526/SC0.csv",  # Scottish Premiership
-    "SC1": "https://www.football-data.co.uk/mmz4281/2526/SC1.csv",  # Scottish Championship
+    "SC0": "SC0",  # Scottish Premiership
+    "SC1": "SC1",  # Scottish Championship
     # Spain
-    "SP1": "https://www.football-data.co.uk/mmz4281/2526/SP1.csv",  # La Liga
-    "SP2": "https://www.football-data.co.uk/mmz4281/2526/SP2.csv",  # Segunda División
+    "SP1": "SP1",  # La Liga
+    "SP2": "SP2",  # Segunda División
     # Germany
-    "D1": "https://www.football-data.co.uk/mmz4281/2526/D1.csv",  # Bundesliga
-    "D2": "https://www.football-data.co.uk/mmz4281/2526/D2.csv",  # 2. Bundesliga
+    "D1": "D1",  # Bundesliga
+    "D2": "D2",  # 2. Bundesliga
     # Italy
-    "I1": "https://www.football-data.co.uk/mmz4281/2526/I1.csv",  # Serie A
-    "I2": "https://www.football-data.co.uk/mmz4281/2526/I2.csv",  # Serie B
+    "I1": "I1",  # Serie A
+    "I2": "I2",  # Serie B
     # France
-    "F1": "https://www.football-data.co.uk/mmz4281/2526/F1.csv",  # Ligue 1
-    "F2": "https://www.football-data.co.uk/mmz4281/2526/F2.csv",  # Ligue 2
+    "F1": "F1",  # Ligue 1
+    "F2": "F2",  # Ligue 2
     # Portugal
-    "P1": "https://www.football-data.co.uk/mmz4281/2526/P1.csv",  # Primeira Liga
+    "P1": "P1",  # Primeira Liga
     # Netherlands
-    "N1": "https://www.football-data.co.uk/mmz4281/2526/N1.csv",  # Eredivisie
+    "N1": "N1",  # Eredivisie
     # Denmark
-    "DNK": "https://www.football-data.co.uk/new/DNK.csv",  # Danish Superliga
+    "DNK": "DNK",  # Danish Superliga
 }
+
+
+def season_start_year(today: Optional[date] = None) -> int:
+    """Start year of the football season `today` falls in (2026 for 2026/27)."""
+    today = today or date.today()
+    return today.year if today.month >= SEASON_START_MONTH else today.year - 1
+
+
+def season_code(start_year: int) -> str:
+    """football-data.co.uk path code for a season: 2026 -> "2627"."""
+    return f"{start_year % 100:02d}{(start_year + 1) % 100:02d}"
+
+
+def season_labels(start_year: int, today: Optional[date] = None) -> frozenset[str]:
+    """Season-column values that mean `start_year`'s season in a /new/ file.
+
+    Split-year leagues label it "2026/2027". Calendar-year leagues (Sweden,
+    Norway, ...) label the season by the year it is played in, so the season
+    that is "current" in September 2026 is "2026" and the prior one "2025".
+    """
+    today = today or date.today()
+    seasons_back = season_start_year(today) - start_year
+    return frozenset({f"{start_year}/{start_year + 1}", str(today.year - seasons_back)})
+
+
+def league_url(league_code: str, start_year: int) -> str:
+    """URL of the file holding `league_code` for the season starting `start_year`."""
+    file_code = LEAGUE_FILES[league_code]
+    if league_code in NEW_FORMAT_LEAGUES:
+        return f"{FOOTBALL_DATA_BASE}/new/{file_code}.csv"
+    return f"{FOOTBALL_DATA_BASE}/mmz4281/{season_code(start_year)}/{file_code}.csv"
+
+
+# Current-season URLs as of import, kept for callers that only need the league
+# codes. The service builds its own URLs per fetch so a long-running process
+# rolls over in July without a restart.
+LEAGUE_URLS = {code: league_url(code, season_start_year()) for code in LEAGUE_FILES}
 
 # League tiers - Tier 1 = top division, Tier 2 = second division
 # Higher tiers are more predictable and get priority
@@ -153,26 +220,34 @@ class MatchResult:
 
 @dataclass
 class TeamStats:
-    """Statistics for a single team."""
+    """Statistics for a single team.
+
+    Counts are floats: a blended TeamStats is this season's counts plus a
+    fraction of last season's (see ``blend_team_stats``), so ``home_played``
+    can legitimately read 2 + 0.8 * 19 = 17.2.
+    """
 
     team_name: str
-    matches_played: int = 0
+    matches_played: float = 0.0
 
     # Home stats
-    home_played: int = 0
-    home_goals_for: int = 0
-    home_goals_against: int = 0
-    home_wins: int = 0
-    home_draws: int = 0
-    home_losses: int = 0
+    home_played: float = 0.0
+    home_goals_for: float = 0.0
+    home_goals_against: float = 0.0
+    home_wins: float = 0.0
+    home_draws: float = 0.0
+    home_losses: float = 0.0
 
     # Away stats
-    away_played: int = 0
-    away_goals_for: int = 0
-    away_goals_against: int = 0
-    away_wins: int = 0
-    away_draws: int = 0
-    away_losses: int = 0
+    away_played: float = 0.0
+    away_goals_for: float = 0.0
+    away_goals_against: float = 0.0
+    away_wins: float = 0.0
+    away_draws: float = 0.0
+    away_losses: float = 0.0
+
+    # Largest prior-season weight applied to either split (0.0 = this season only).
+    prior_weight: float = 0.0
 
     @property
     def home_scored_avg(self) -> float:
@@ -195,12 +270,12 @@ class TeamStats:
         return self.away_goals_against / self.away_played if self.away_played > 0 else 0.0
 
     @property
-    def total_goals_for(self) -> int:
+    def total_goals_for(self) -> float:
         """Total goals scored."""
         return self.home_goals_for + self.away_goals_for
 
     @property
-    def total_goals_against(self) -> int:
+    def total_goals_against(self) -> float:
         """Total goals conceded."""
         return self.home_goals_against + self.away_goals_against
 
@@ -229,12 +304,12 @@ class TeamStats:
         return (self.away_wins + self.away_draws) / self.away_played
 
     @property
-    def total_wins(self) -> int:
+    def total_wins(self) -> float:
         """Total wins across home and away."""
         return self.home_wins + self.away_wins
 
     @property
-    def total_losses(self) -> int:
+    def total_losses(self) -> float:
         """Total losses across home and away."""
         return self.home_losses + self.away_losses
 
@@ -266,11 +341,14 @@ class LeagueStats:
 
     league_code: str
     teams: dict[str, TeamStats] = field(default_factory=dict)
-    match_results: list[MatchResult] = field(default_factory=list)  # All match results
-    total_matches: int = 0
-    total_home_goals: int = 0
-    total_away_goals: int = 0
+    match_results: list[MatchResult] = field(default_factory=list)  # This season only
+    total_matches: float = 0.0
+    total_home_goals: float = 0.0
+    total_away_goals: float = 0.0
     last_updated: Optional[datetime] = None
+    season_start_year: Optional[int] = None
+    # League-level prior-season weight that went into the totals (0.0 = none).
+    prior_weight: float = 0.0
 
     @property
     def avg_home_goals(self) -> float:
@@ -281,6 +359,186 @@ class LeagueStats:
     def avg_away_goals(self) -> float:
         """League average away goals per match."""
         return self.total_away_goals / self.total_matches if self.total_matches > 0 else 1.2
+
+
+_HOME_FIELDS = (
+    "home_played", "home_goals_for", "home_goals_against",
+    "home_wins", "home_draws", "home_losses",
+)
+_AWAY_FIELDS = (
+    "away_played", "away_goals_for", "away_goals_against",
+    "away_wins", "away_draws", "away_losses",
+)
+
+
+def parse_league_csv(
+    text: str,
+    league_code: str,
+    season_filter: Optional[frozenset[str]] = None,
+) -> LeagueStats:
+    """Parse one football-data.co.uk CSV into a single season's LeagueStats.
+
+    Args:
+        text: Raw CSV.
+        league_code: Our league code, stored on the result.
+        season_filter: For multi-season /new/ files, the Season-column values
+            to keep. None means the file holds one season (mmz4281 layout).
+    """
+    reader = csv.DictReader(io.StringIO(text))
+    league_stats = LeagueStats(league_code=league_code)
+
+    for row in reader:
+        try:
+            if season_filter is not None and row.get("Season", "") not in season_filter:
+                continue
+
+            # New format uses Home/Away rather than HomeTeam/AwayTeam
+            home_team = (row.get("HomeTeam", "") or row.get("Home", "")).strip()
+            away_team = (row.get("AwayTeam", "") or row.get("Away", "")).strip()
+            if not home_team or not away_team:
+                continue
+
+            # A fixture row with no score yet is not a result
+            home_goals_raw = row.get("FTHG") or row.get("HG")
+            away_goals_raw = row.get("FTAG") or row.get("AG")
+            if home_goals_raw in (None, "") or away_goals_raw in (None, ""):
+                continue
+            home_goals = int(home_goals_raw)
+            away_goals = int(away_goals_raw)
+
+            match_date = None
+            date_str = row.get("Date", "")
+            if date_str:
+                for fmt in ["%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d"]:
+                    try:
+                        match_date = datetime.strptime(date_str, fmt)
+                        break
+                    except ValueError:
+                        continue
+
+            league_stats.match_results.append(
+                MatchResult(
+                    home_team=home_team,
+                    away_team=away_team,
+                    home_goals=home_goals,
+                    away_goals=away_goals,
+                    match_date=match_date,
+                )
+            )
+
+            league_stats.total_matches += 1
+            league_stats.total_home_goals += home_goals
+            league_stats.total_away_goals += away_goals
+
+            home_stats = league_stats.teams.setdefault(home_team, TeamStats(team_name=home_team))
+            home_stats.matches_played += 1
+            home_stats.home_played += 1
+            home_stats.home_goals_for += home_goals
+            home_stats.home_goals_against += away_goals
+            if home_goals > away_goals:
+                home_stats.home_wins += 1
+            elif home_goals == away_goals:
+                home_stats.home_draws += 1
+            else:
+                home_stats.home_losses += 1
+
+            away_stats = league_stats.teams.setdefault(away_team, TeamStats(team_name=away_team))
+            away_stats.matches_played += 1
+            away_stats.away_played += 1
+            away_stats.away_goals_for += away_goals
+            away_stats.away_goals_against += home_goals
+            if away_goals > home_goals:
+                away_stats.away_wins += 1
+            elif away_goals == home_goals:
+                away_stats.away_draws += 1
+            else:
+                away_stats.away_losses += 1
+
+        except (ValueError, KeyError):
+            continue
+
+    return league_stats
+
+
+def prior_season_weight(games_played: float, full_games: int = BLEND_FULL_GAMES) -> float:
+    """Weight given to last season's numbers after `games_played` this season.
+
+    1.0 with nothing played, falling linearly to 0.0 at `full_games`.
+    """
+    if full_games <= 0:
+        return 0.0
+    return max(0.0, 1.0 - games_played / full_games)
+
+
+def blend_team_stats(
+    current: Optional[TeamStats],
+    prior: Optional[TeamStats],
+    full_games: int = BLEND_FULL_GAMES,
+) -> TeamStats:
+    """This season's counts plus a decaying share of last season's.
+
+    Home and away are weighted separately, so a team that has only played
+    away so far still gets its full prior at home. A team with no prior
+    (promoted, or a new-format league missing the season) is returned as is.
+    """
+    if current is None and prior is None:
+        raise ValueError("blend_team_stats needs at least one season")
+    if current is None:
+        current = TeamStats(team_name=prior.team_name)
+    if prior is None:
+        return current
+
+    w_home = prior_season_weight(current.home_played, full_games)
+    w_away = prior_season_weight(current.away_played, full_games)
+
+    out = TeamStats(team_name=current.team_name)
+    for name in _HOME_FIELDS:
+        setattr(out, name, getattr(current, name) + w_home * getattr(prior, name))
+    for name in _AWAY_FIELDS:
+        setattr(out, name, getattr(current, name) + w_away * getattr(prior, name))
+    out.matches_played = out.home_played + out.away_played
+    out.prior_weight = max(w_home, w_away)
+    return out
+
+
+def blend_league_stats(
+    current: Optional[LeagueStats],
+    prior: Optional[LeagueStats],
+    full_games: int = BLEND_FULL_GAMES,
+) -> LeagueStats:
+    """Blend two seasons of one league into the stats the strategies read.
+
+    The team list is this season's, so relegated sides drop out as soon as a
+    round has been played. Before that (the file exists but is empty, or does
+    not exist yet) last season's table is all there is, and it is used whole.
+    ``match_results`` are this season's only: they exist for settlement, and a
+    result from a year ago must never settle today's bet.
+    """
+    if current is None and prior is None:
+        raise ValueError("blend_league_stats needs at least one season")
+    if prior is None:
+        return current
+    if current is None:
+        current = LeagueStats(league_code=prior.league_code)
+
+    out = LeagueStats(league_code=current.league_code)
+    team_names = set(current.teams) if current.total_matches > 0 else set(prior.teams)
+    for name in team_names:
+        out.teams[name] = blend_team_stats(
+            current.teams.get(name), prior.teams.get(name), full_games
+        )
+
+    # League averages: weight by matches per team so far, not raw matches.
+    n_teams = max(len(team_names), 1)
+    games_per_team = current.total_matches / (n_teams / 2)
+    w_league = prior_season_weight(games_per_team, full_games)
+    out.total_matches = current.total_matches + w_league * prior.total_matches
+    out.total_home_goals = current.total_home_goals + w_league * prior.total_home_goals
+    out.total_away_goals = current.total_away_goals + w_league * prior.total_away_goals
+    out.match_results = list(current.match_results)
+    out.prior_weight = w_league
+    out.season_start_year = current.season_start_year or prior.season_start_year
+    return out
 
 
 class FootballDataService:
@@ -300,6 +558,9 @@ class FootballDataService:
         self._cache: dict[str, LeagueStats] = {}
         self._cache_duration = timedelta(hours=cache_duration_hours)
         self._client = httpx.AsyncClient(timeout=10.0)  # Short timeout to prevent blocking
+        # A finished season never changes, so its parsed stats live for the
+        # process. Keyed by (league, start_year).
+        self._prior_cache: dict[tuple[str, int], LeagueStats] = {}
 
     async def close(self):
         """Close the HTTP client."""
@@ -494,135 +755,91 @@ class FootballDataService:
         normalized = name.lower().strip()
         return name_mappings.get(normalized, normalized)
 
-    async def fetch_league_data(self, league_code: str) -> Optional[LeagueStats]:
-        """
-        Fetch and parse league data from football-data.co.uk.
-
-        Args:
-            league_code: League code (E0, E1, SC0, etc.)
-
-        Returns:
-            LeagueStats object or None if fetch failed
-        """
-        url = LEAGUE_URLS.get(league_code)
-        if not url:
-            logger.warning(f"Unknown league code: {league_code}")
-            return None
-
+    async def _download(self, url: str) -> Optional[str]:
+        """Fetch a CSV, returning None on any failure (logged, never raised)."""
         try:
             response = await self._client.get(url)
             response.raise_for_status()
-
-            # Parse CSV
-            content = response.text
-            reader = csv.DictReader(io.StringIO(content))
-
-            league_stats = LeagueStats(league_code=league_code)
-
-            # For "new" format leagues (AUT, DNK, SWZ), filter to current season
-            current_season = "2024/2025"  # Update each season
-            is_new_format = league_code in ("AUT", "DNK", "SWZ")
-
-            for row in reader:
-                try:
-                    # Skip non-current seasons for new format leagues
-                    if is_new_format:
-                        season = row.get("Season", "")
-                        if season != current_season:
-                            continue
-
-                    # Try different column names for teams (new format uses Home/Away)
-                    home_team = row.get("HomeTeam", "") or row.get("Home", "")
-                    away_team = row.get("AwayTeam", "") or row.get("Away", "")
-                    home_team = home_team.strip()
-                    away_team = away_team.strip()
-
-                    # Try different column names for goals
-                    home_goals = int(row.get("FTHG") or row.get("HG") or 0)
-                    away_goals = int(row.get("FTAG") or row.get("AG") or 0)
-
-                    if not home_team or not away_team:
-                        continue
-
-                    # Parse match date
-                    match_date = None
-                    date_str = row.get("Date", "")
-                    if date_str:
-                        for fmt in ["%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d"]:
-                            try:
-                                match_date = datetime.strptime(date_str, fmt)
-                                break
-                            except ValueError:
-                                continue
-
-                    # Store the match result
-                    match_result = MatchResult(
-                        home_team=home_team,
-                        away_team=away_team,
-                        home_goals=home_goals,
-                        away_goals=away_goals,
-                        match_date=match_date,
-                    )
-                    league_stats.match_results.append(match_result)
-
-                    # Update league totals
-                    league_stats.total_matches += 1
-                    league_stats.total_home_goals += home_goals
-                    league_stats.total_away_goals += away_goals
-
-                    # Update home team stats
-                    if home_team not in league_stats.teams:
-                        league_stats.teams[home_team] = TeamStats(team_name=home_team)
-
-                    home_stats = league_stats.teams[home_team]
-                    home_stats.matches_played += 1
-                    home_stats.home_played += 1
-                    home_stats.home_goals_for += home_goals
-                    home_stats.home_goals_against += away_goals
-
-                    if home_goals > away_goals:
-                        home_stats.home_wins += 1
-                    elif home_goals == away_goals:
-                        home_stats.home_draws += 1
-                    else:
-                        home_stats.home_losses += 1
-
-                    # Update away team stats
-                    if away_team not in league_stats.teams:
-                        league_stats.teams[away_team] = TeamStats(team_name=away_team)
-
-                    away_stats = league_stats.teams[away_team]
-                    away_stats.matches_played += 1
-                    away_stats.away_played += 1
-                    away_stats.away_goals_for += away_goals
-                    away_stats.away_goals_against += home_goals
-
-                    if away_goals > home_goals:
-                        away_stats.away_wins += 1
-                    elif away_goals == home_goals:
-                        away_stats.away_draws += 1
-                    else:
-                        away_stats.away_losses += 1
-
-                except (ValueError, KeyError) as e:
-                    continue
-
-            league_stats.last_updated = datetime.utcnow()
-
-            logger.info(
-                "Fetched league data",
-                league=league_code,
-                teams=len(league_stats.teams),
-                matches=league_stats.total_matches,
-                avg_home_goals=f"{league_stats.avg_home_goals:.2f}",
-                avg_away_goals=f"{league_stats.avg_away_goals:.2f}",
-            )
-
-            return league_stats
-
+            return response.text
         except Exception as e:
-            logger.error(f"Failed to fetch league data for {league_code}: {e}")
+            logger.warning("Failed to download league file", url=url, error=str(e))
             return None
+
+    async def _season_stats(
+        self,
+        league_code: str,
+        start_year: int,
+        today: date,
+        downloads: dict[str, str],
+    ) -> Optional[LeagueStats]:
+        """One season of one league, or None if its file could not be fetched.
+
+        `downloads` memoises file text within a fetch, because a /new/ file
+        holds every season and would otherwise be downloaded twice.
+        """
+        url = league_url(league_code, start_year)
+        text = downloads.get(url)
+        if text is None:
+            text = await self._download(url)
+            if text is None:
+                return None
+            downloads[url] = text
+
+        season_filter = (
+            season_labels(start_year, today) if league_code in NEW_FORMAT_LEAGUES else None
+        )
+        stats = parse_league_csv(text, league_code, season_filter)
+        stats.season_start_year = start_year
+        return stats
+
+    async def fetch_league_data(
+        self, league_code: str, today: Optional[date] = None
+    ) -> Optional[LeagueStats]:
+        """
+        Fetch this season's results for a league and blend in last season's.
+
+        Args:
+            league_code: League code (E0, E1, SC0, etc.)
+            today: Date to derive the season from (defaults to today).
+
+        Returns:
+            Blended LeagueStats, or None if neither season could be fetched.
+        """
+        if league_code not in LEAGUE_FILES:
+            logger.warning(f"Unknown league code: {league_code}")
+            return None
+
+        today = today or date.today()
+        start_year = season_start_year(today)
+        downloads: dict[str, str] = {}
+
+        current = await self._season_stats(league_code, start_year, today, downloads)
+
+        prior = self._prior_cache.get((league_code, start_year - 1))
+        if prior is None:
+            prior = await self._season_stats(league_code, start_year - 1, today, downloads)
+            if prior is not None and prior.total_matches > 0:
+                self._prior_cache[(league_code, start_year - 1)] = prior
+
+        if current is None and prior is None:
+            logger.error("Failed to fetch league data", league=league_code, season=season_code(start_year))
+            return None
+
+        stats = blend_league_stats(current, prior, BLEND_FULL_GAMES)
+        stats.season_start_year = start_year
+        stats.last_updated = datetime.utcnow()
+
+        logger.info(
+            "Fetched league data",
+            league=league_code,
+            season=season_code(start_year),
+            matches_this_season=int(current.total_matches) if current else 0,
+            prior_weight=f"{stats.prior_weight:.2f}",
+            teams=len(stats.teams),
+            avg_home_goals=f"{stats.avg_home_goals:.2f}",
+            avg_away_goals=f"{stats.avg_away_goals:.2f}",
+        )
+        return stats
 
     async def get_league_stats(self, league_code: str, force_refresh: bool = False) -> Optional[LeagueStats]:
         """
@@ -675,7 +892,7 @@ class FootballDataService:
             return None
 
         # Search all cached leagues
-        for league_code in LEAGUE_URLS.keys():
+        for league_code in LEAGUE_FILES.keys():
             league = await self.get_league_stats(league_code)
             if league:
                 for name, stats in league.teams.items():
@@ -702,7 +919,7 @@ class FootballDataService:
             Tuple of (home_stats, away_stats, league_stats) or None
         """
         # Try to find both teams
-        leagues_to_search = [league_code] if league_code else list(LEAGUE_URLS.keys())
+        leagues_to_search = [league_code] if league_code else list(LEAGUE_FILES.keys())
 
         for lc in leagues_to_search:
             league = await self.get_league_stats(lc)
@@ -875,7 +1092,7 @@ class FootballDataService:
         )
 
         # Search all leagues (refresh data to get latest results)
-        for league_code in LEAGUE_URLS.keys():
+        for league_code in LEAGUE_FILES.keys():
             # Force refresh to get latest results (cache only 1 hour for result lookups)
             league = await self.get_league_stats(league_code, force_refresh=False)
             if not league or not league.match_results:

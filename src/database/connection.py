@@ -103,6 +103,7 @@ class DatabaseConnection:
             ("bets", "clv_percent", "ALTER TABLE bets ADD COLUMN clv_percent REAL"),
             ("bets", "close_recorded_at", "ALTER TABLE bets ADD COLUMN close_recorded_at DATETIME"),
             ("markets", "number_of_winners", "ALTER TABLE markets ADD COLUMN number_of_winners INTEGER"),
+            ("markets", "competition", "ALTER TABLE markets ADD COLUMN competition VARCHAR(200)"),
         ]
 
         async with self._engine.begin() as conn:

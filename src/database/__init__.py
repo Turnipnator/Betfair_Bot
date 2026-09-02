@@ -4,6 +4,7 @@ from src.database.connection import DatabaseConnection, db, get_session
 from src.database.repositories import (
     BankrollRepository,
     BetRepository,
+    EvaluationRepository,
     MarketRepository,
     PerformanceRepository,
 )
@@ -15,6 +16,7 @@ from src.database.schema import (
     FootballTeamStats,
     HorseFormRecord,
     MarketRecord,
+    StrategyEvaluationRecord,
     StrategyPerformanceRecord,
 )
 
@@ -26,6 +28,7 @@ __all__ = [
     # Repositories
     "BankrollRepository",
     "BetRepository",
+    "EvaluationRepository",
     "MarketRepository",
     "PerformanceRepository",
     # Schema
@@ -36,5 +39,6 @@ __all__ = [
     "FootballTeamStats",
     "HorseFormRecord",
     "MarketRecord",
+    "StrategyEvaluationRecord",
     "StrategyPerformanceRecord",
 ]

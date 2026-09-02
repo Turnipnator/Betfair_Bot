@@ -28,7 +28,14 @@ from apscheduler.triggers.cron import CronTrigger
 from config import settings
 from config.logging_config import setup_logging, get_logger
 from src.betfair import betfair_client
-from src.database import db, BankrollRepository, BetRepository, MarketRepository, PerformanceRepository
+from src.database import (
+    db,
+    BankrollRepository,
+    BetRepository,
+    EvaluationRepository,
+    MarketRepository,
+    PerformanceRepository,
+)
 from src.models import Bet, BetResult, BetSignal, BetStatus, BetType, MarketFilter, Sport
 from src.paper_trading import PaperTradingSimulator
 from src.risk import risk_manager
@@ -47,7 +54,12 @@ from src.strategies.horse_racing import (
 )
 from src.telegram_bot import telegram_bot, notifier
 from src.reporting import report_generator, daily_report_generator
-from src.utils import calculate_stake, calculate_kelly_stake, compute_clv_percent
+from src.utils import (
+    calculate_stake,
+    calculate_kelly_stake,
+    closing_line_capturable,
+    compute_clv_percent,
+)
 from src.data.football_data import football_data_service
 from src.betfair.execution import order_executor
 from src.streaming.stream_manager import StreamManager
@@ -99,6 +111,16 @@ class PaperTradingEngine:
 
         # Initialize database
         await db.initialize()
+
+        # CLV readings taken after kick-off are the result, not the line.
+        # Idempotent, so it runs every boot (see BetRepository.purge_post_off_clv).
+        try:
+            async with db.session() as session:
+                cleared = await BetRepository(session).purge_post_off_clv()
+            if cleared:
+                logger.warning("Cleared CLV readings captured after the off", count=cleared)
+        except Exception as e:
+            logger.warning("CLV purge failed", error=str(e))
 
         # Get bankroll - from Betfair in LIVE mode, calculated in PAPER mode
         is_paper = settings.is_paper_mode()
@@ -258,6 +280,7 @@ class PaperTradingEngine:
         for name in enabled:
             if name in strategy_map:
                 strategy = strategy_map[name]()
+                strategy.set_evaluation_sink(self._record_evaluation)
                 self._strategies.append(strategy)
                 logger.info("Strategy enabled", strategy=name)
             else:
@@ -505,6 +528,16 @@ class PaperTradingEngine:
             replace_existing=True,
         )
 
+        # Fill HT/FT scores into the persisted strategy funnel so rejected
+        # fixtures can be scored against the ones we bet. Two minutes, so a
+        # 15-minute half-time is not missed.
+        self._scheduler.add_job(
+            self.enrich_evaluations,
+            IntervalTrigger(minutes=2),
+            id="enrich_evaluations",
+            replace_existing=True,
+        )
+
         # Schedule balance sync with Betfair (LIVE mode only)
         # Syncs every 10 minutes to ensure bankroll matches Betfair's records
         if settings.is_live_mode():
@@ -746,6 +779,105 @@ class PaperTradingEngine:
         except Exception as e:
             logger.error("Error scanning markets", error=str(e))
 
+    async def _record_evaluation(
+        self,
+        *,
+        strategy: str,
+        market,
+        stage: str,
+        outcome: str,
+        reason: str,
+        detail: Optional[dict] = None,
+    ) -> None:
+        """Evaluation sink attached to every strategy: persist one funnel verdict."""
+        async with db.session() as session:
+            await EvaluationRepository(session).upsert(
+                strategy=strategy,
+                market=market,
+                stage=stage,
+                outcome=outcome,
+                reason=reason,
+                detail=detail,
+            )
+
+    async def enrich_evaluations(self) -> None:
+        """
+        Fill half-time and full-time scores into the persisted strategy funnel.
+
+        Betfair's in-play feed has no history, so HT is only readable while
+        the status is HalfTime: rows are polled through the 40–75 minute
+        window and the score taken whenever the feed says so. FT is taken
+        once the feed says Finished; if that was missed, the football-data
+        results file fills it in from three hours after kick-off.
+        """
+        if not betfair_client.is_logged_in:
+            return
+
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        try:
+            async with db.session() as session:
+                pending = await EvaluationRepository(session).get_pending_scores(now)
+            if not pending:
+                return
+
+            updates: list[tuple[int, Optional[tuple[int, int]], Optional[tuple[int, int]]]] = []
+            for row in pending:
+                minutes_since_ko = (now - row.start_time).total_seconds() / 60
+                in_ht_window = row.ht_home is None and minutes_since_ko <= EvaluationRepository.HT_WINDOW_MINUTES[1]
+                # Past the HT window only FT is wanted; don't hammer the feed
+                # for it more than every ten minutes per fixture.
+                if not in_ht_window and row.scores_checked_at is not None:
+                    if (now - row.scores_checked_at).total_seconds() < 600:
+                        continue
+
+                ht = ft = None
+                try:
+                    state = await betfair_client.get_match_state(row.event_id)
+                except Exception as e:
+                    logger.debug("Match state unavailable for funnel row", event_id=row.event_id, error=str(e))
+                    state = None
+
+                if state:
+                    if row.ht_home is None and state.is_half_time:
+                        ht = (state.home_score, state.away_score)
+                    if row.ft_home is None and state.is_finished:
+                        ft = (state.home_score, state.away_score)
+
+                if row.ft_home is None and ft is None and minutes_since_ko > 180 and row.event_name:
+                    ft = await self._lookup_ft_from_results(row.event_name, row.start_time)
+
+                if ht or ft or not in_ht_window:
+                    updates.append((row.id, ht, ft))
+
+            if updates:
+                async with db.session() as session:
+                    repo = EvaluationRepository(session)
+                    for row_id, ht, ft in updates:
+                        await repo.record_scores(row_id, ht=ht, ft=ft, checked_at=now)
+                scored = sum(1 for _, ht, ft in updates if ht or ft)
+                if scored:
+                    logger.info("Funnel scores recorded", rows=scored, checked=len(pending))
+        except Exception as e:
+            logger.warning("Evaluation score enrichment failed", error=str(e)[:200])
+
+    async def _lookup_ft_from_results(
+        self, event_name: str, start_time: datetime
+    ) -> Optional[tuple[int, int]]:
+        """Full-time score from the football-data results file, for covered leagues."""
+        if " v " not in event_name:
+            return None
+        home, away = (part.strip() for part in event_name.split(" v ", 1))
+        try:
+            result = await football_data_service.get_match_result(
+                home_team=home, away_team=away, match_date=start_time, date_tolerance_days=1
+            )
+        except Exception as e:
+            logger.debug("Results lookup failed for funnel row", event=event_name, error=str(e))
+            return None
+        if result is None:
+            return None
+        return (result.home_goals, result.away_goals)
+
     async def _check_ltd_halftime_candidates(self) -> None:
         """Check LTD candidates for half-time 0-0 entry."""
         from src.strategies.lay_the_draw import LayTheDrawStrategy
@@ -761,7 +893,7 @@ class PaperTradingEngine:
             return
 
         # Clean up expired candidates
-        ltd_strategy.cleanup_expired_candidates()
+        await ltd_strategy.cleanup_expired_candidates()
 
         candidates = ltd_strategy.get_candidates()
         if not candidates:
@@ -1517,7 +1649,7 @@ class PaperTradingEngine:
 
     async def record_closing_lines(self) -> None:
         """
-        Snapshot the last traded price for in-flight and recently-settled bets.
+        Snapshot the last traded price for open bets while their market is pre-off.
 
         CLV (Closing Line Value) is the % gap between our matched odds and the
         market's last traded price on our selection. Positive CLV means we beat
@@ -1525,13 +1657,13 @@ class PaperTradingEngine:
         of real edge — visible in dozens of bets rather than the hundreds W/L
         variance needs to reveal whether a strategy works.
 
-        We capture continuously while a bet is open: Betfair purges markets
-        from list_market_book shortly after they close, so by the time a bet
-        settles the market may already be unqueryable. By snapshotting every
-        cycle on open bets, the final successful update before settlement
-        becomes our "close". For settled bets without a snapshot, we still
-        attempt one — sometimes Betfair's price is queryable for an hour or
-        two post-close.
+        We capture every cycle while a bet is open and its market has not
+        turned in-play; the last snapshot before kick-off is the closing line.
+        Nothing is recorded once the market is in-play or closed: from then on
+        last_price_traded is the match, and after the off it is the result
+        (1.02 on a winner). That is how value_betting logged -49% CLV on a
+        winning bet until Sep 2026 — the job kept "refreshing" through the
+        match and after settlement.
 
         Bets older than 7 days are dropped from the queue.
         """
@@ -1551,6 +1683,7 @@ class PaperTradingEngine:
 
             no_market = 0
             no_ltp = 0
+            post_off = 0
             updated = 0
             first_captures = 0
             now = datetime.now(timezone.utc)
@@ -1562,6 +1695,12 @@ class PaperTradingEngine:
                     market = markets.get(bet.market_id) if markets else None
                     if not market:
                         no_market += 1
+                        continue
+
+                    # In-play or closed: the line is gone, the last pre-off
+                    # snapshot stands.
+                    if not closing_line_capturable(market):
+                        post_off += 1
                         continue
 
                     runner = market.get_runner(bet.selection_id)
@@ -1612,6 +1751,7 @@ class PaperTradingEngine:
                 first_captures=first_captures,
                 no_market=no_market,
                 no_ltp=no_ltp,
+                post_off=post_off,
             )
 
         except Exception as e:
@@ -1940,6 +2080,8 @@ class PaperTradingEngine:
                                 event_id=signal.event_id,
                                 status=MarketStatus.OPEN,
                                 number_of_winners=signal.number_of_winners,
+                                competition=signal.competition,
+                                country_code=signal.country_code,
                             )
                             await market_repo.save(minimal_market)
                             market_start_time = minimal_market.start_time
@@ -1947,6 +2089,11 @@ class PaperTradingEngine:
                         else:
                             market_start_time = existing_market.start_time
                             event_id = existing_market.event_id
+                            # Older rows were created without these.
+                            if signal.competition and not existing_market.competition:
+                                existing_market.competition = signal.competition
+                            if signal.country_code and not existing_market.country_code:
+                                existing_market.country_code = signal.country_code
 
                         # Now save the bet
                         bet_repo = BetRepository(session)

@@ -5,7 +5,7 @@ All trading strategies must inherit from this class.
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from config.logging_config import get_logger
 from src.models import Bet, BetSignal, Market, Sport
@@ -35,6 +35,10 @@ class BaseStrategy(ABC):
         """Initialize the strategy."""
         self._enabled: bool = True
         self.logger = get_logger(f"strategy.{self.name}")
+        # Where funnel decisions go (the engine attaches a DB writer). None
+        # means record_evaluation() is a no-op, so strategies stay usable in
+        # tests and scripts without a database.
+        self._evaluation_sink: Optional[Callable[..., Awaitable[None]]] = None
 
     @property
     def is_enabled(self) -> bool:
@@ -129,6 +133,44 @@ class BaseStrategy(ABC):
             return False
 
         return True
+
+    def set_evaluation_sink(self, sink: Optional[Callable[..., Awaitable[None]]]) -> None:
+        """Attach the coroutine that persists funnel decisions (see record_evaluation)."""
+        self._evaluation_sink = sink
+
+    async def record_evaluation(
+        self,
+        market: Market,
+        stage: str,
+        outcome: str,
+        reason: str,
+        **detail: Any,
+    ) -> None:
+        """
+        Record one funnel decision for `market`.
+
+        Args:
+            market: The market evaluated (its metadata is persisted with the row).
+            stage: "prematch" or "halftime".
+            outcome: "candidate", "rejected", "entered" or "dropped".
+            reason: Short machine code for the branch taken.
+            **detail: The numbers the decision rested on (draw_odds, ...).
+
+        Never raises: a failing sink must not stop a strategy from trading.
+        """
+        if self._evaluation_sink is None:
+            return
+        try:
+            await self._evaluation_sink(
+                strategy=self.name,
+                market=market,
+                stage=stage,
+                outcome=outcome,
+                reason=reason,
+                detail=detail,
+            )
+        except Exception as e:
+            self.logger.debug("Evaluation sink failed", error=str(e), reason=reason)
 
     def log_signal(self, signal: BetSignal) -> None:
         """Log a generated signal."""

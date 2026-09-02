@@ -87,7 +87,7 @@ ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "free -h && echo '---' && df -
   and both are bad.
 
 ```bash
-ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "grep -E 'ENABLE_|MODE|STRATEGY|STAKE|STREAMING|EXPOSURE' /opt/betfair-bot/.env | sed -E 's/(KEY|TOKEN|PASSWORD|SECRET)=.*/\1=<redacted>/I'"
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "grep -E '^(ENABLED_STRATEGIES|TRADING_MODE|LOG_LEVEL|.*STAKE.*|.*EXPOSURE.*|STREAMING.*|MARKET_SCAN_INTERVAL|MIN_TIME_TO_START)=' /opt/betfair-bot/.env | sed -E 's/(KEY|TOKEN|PASSWORD|SECRET)=.*/\1=<redacted>/I'"
 # Deployed vs local drift (run from the repo root)
 ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "cd /opt/betfair-bot && find src config scripts -name '*.py' -exec md5sum {} +" | awk '{print $2, $1}' | sort > /tmp/vps_md5.txt; find src config scripts -name '*.py' -exec md5 -r {} + | awk '{print $2, $1}' | sort > /tmp/local_md5.txt; diff /tmp/local_md5.txt /tmp/vps_md5.txt | grep '^[<>]' | awk '{print $2}' | sort -u
 ```
@@ -129,12 +129,14 @@ ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sed -E 's/\x1b\[[0-9;]*m//g' 
 - Unsettled bets older than 24h are stranded (see CLAUDE.md, "A missing result is not a non-runner").
 - A run of VOIDs on the Nags paper legs is the results-cache bug signature — compare against the
   live `nags_place` leg on the same horse, which settles from Betfair.
-- A long losing run on `nags_back` should be **cross-checked against Nags's own results table**
+- A long losing run on a Nags strategy should be **cross-checked against Nags's own results table**
   before it is blamed on settlement. If Nags agrees the horses lost, it is selection, not the bot.
 
 ```bash
 ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header /tmp/bf.db \"SELECT id, strategy, selection_name, status, placed_at FROM bets WHERE status!='SETTLED' AND placed_at < datetime('now','-1 day');\"; sqlite3 /tmp/bf.db \"SELECT strategy, COUNT(*) FROM bets WHERE result='VOID' AND placed_at > datetime('now','-14 days') GROUP BY 1;\""
-# Nags's own view of its recent primary picks (nap/next_best/selection are what nags_back backs)
+# LTD funnel is being written and scored (table exists from the 2 Sep 2026 build)
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 /tmp/bf.db \"SELECT stage, outcome, COUNT(*) n, SUM(ft_home IS NOT NULL) scored FROM strategy_evaluations WHERE start_time > datetime('now','-7 days') GROUP BY 1,2;\""
+# Nags's own view of its recent picks (nags_place takes the first of nap > next_best > selection > race_nb per race)
 ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header 'file:/root/horse-racing-bot/data/racing.db?mode=ro' \"SELECT date(s.created_at) d, s.horse, s.selection_type, r.result, r.finish_position FROM selections s LEFT JOIN results r ON r.selection_id=s.id WHERE s.created_at > datetime('now','-14 days') AND s.superseded_at IS NULL ORDER BY s.created_at;\""
 ```
 

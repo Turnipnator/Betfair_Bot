@@ -714,6 +714,7 @@ class ValueBettingStrategy(BaseStrategy):
             market_name=market.market_name,
             event_name=market.event_name,
             competition=market.competition,
+            country_code=market.country_code,
             reason=f"Value edge of {edge:.1%} at odds {odds:.2f}",
             market_start_time=market.start_time,
         )

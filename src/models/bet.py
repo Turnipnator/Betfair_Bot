@@ -66,6 +66,7 @@ class BetSignal:
     market_name: Optional[str] = None
     event_name: Optional[str] = None
     competition: Optional[str] = None  # Competition name (e.g., "Premier League", "EFL Cup")
+    country_code: Optional[str] = None  # Betfair event country ("GB", "ES"); persisted with the market
     reason: str = ""
 
     # Betfair market type ("WIN", "PLACE", "MATCH_ODDS"). Needed so a PLACE

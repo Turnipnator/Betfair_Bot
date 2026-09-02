@@ -42,6 +42,10 @@ class MarketRecord(Base):
     start_time: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     venue: Mapped[Optional[str]] = mapped_column(String(100))
     country_code: Mapped[Optional[str]] = mapped_column(String(10))
+    # Betfair competition name ("Premier League", "UEFA Champions League").
+    # Fetched from the catalogue since day one but never stored, which left
+    # every per-league question unanswerable from the DB.
+    competition: Mapped[Optional[str]] = mapped_column(String(200))
     status: Mapped[str] = mapped_column(String(20), default="OPEN")
     total_matched: Mapped[float] = mapped_column(Float, default=0.0)
     event_id: Mapped[Optional[int]] = mapped_column(Integer)  # Betfair event ID for in-play data
@@ -111,6 +115,58 @@ class BetRecord(Base):
         Index("idx_bets_status", "status"),
         Index("idx_bets_placed", "placed_at"),
         Index("idx_bets_is_paper", "is_paper"),
+    )
+
+
+class StrategyEvaluationRecord(Base):
+    """One row per (strategy, market, stage): the funnel, persisted.
+
+    Strategies evaluate every market every scan and log why they passed on
+    it, but the log rotates in two days and nothing else remembers. This
+    table keeps the *latest* verdict per fixture and stage (a pre-match
+    "draw odds out of range" at 09:00 can become "candidate" by kick-off),
+    together with the numbers the verdict rested on, and is later filled in
+    with the half-time and full-time scores so rejected fixtures can be
+    scored against the ones we bet. That is the only way to answer "does
+    filter X earn its keep" with data rather than a two-day log window.
+    """
+
+    __tablename__ = "strategy_evaluations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    strategy: Mapped[str] = mapped_column(String(50), nullable=False)
+    market_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    # "prematch" (candidate identification) or "halftime" (entry decision)
+    stage: Mapped[str] = mapped_column(String(20), nullable=False)
+    # candidate | rejected | entered | dropped
+    outcome: Mapped[str] = mapped_column(String(20), nullable=False)
+    # Short machine code: no_clear_favourite, liquidity, ht_odds_range, ...
+    reason: Mapped[str] = mapped_column(String(60), nullable=False)
+    # JSON of the values behind the verdict (draw_odds, favourite_odds, ...)
+    detail: Mapped[Optional[str]] = mapped_column(Text)
+
+    event_name: Mapped[Optional[str]] = mapped_column(String(200))
+    competition: Mapped[Optional[str]] = mapped_column(String(200))
+    country_code: Mapped[Optional[str]] = mapped_column(String(10))
+    start_time: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    event_id: Mapped[Optional[int]] = mapped_column(Integer)
+
+    first_seen: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_seen: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    evaluations: Mapped[int] = mapped_column(Integer, default=1)
+
+    # Filled in afterwards by the score-enrichment job. HT is only knowable
+    # while the match is at half-time, so it can legitimately stay NULL.
+    ht_home: Mapped[Optional[int]] = mapped_column(Integer)
+    ht_away: Mapped[Optional[int]] = mapped_column(Integer)
+    ft_home: Mapped[Optional[int]] = mapped_column(Integer)
+    ft_away: Mapped[Optional[int]] = mapped_column(Integer)
+    scores_checked_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+
+    __table_args__ = (
+        UniqueConstraint("strategy", "market_id", "stage", name="uq_eval_strategy_market_stage"),
+        Index("idx_eval_start_time", "start_time"),
+        Index("idx_eval_strategy", "strategy"),
     )
 
 

@@ -4,8 +4,9 @@ Database repositories for CRUD operations.
 Provides clean interfaces for interacting with database tables.
 """
 
+import json
 from datetime import date, datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +17,7 @@ from src.database.schema import (
     BetRecord,
     DailyPerformanceRecord,
     MarketRecord,
+    StrategyEvaluationRecord,
     StrategyPerformanceRecord,
 )
 from src.models import (
@@ -40,6 +42,13 @@ IN_PLAY_ENTRY_STRATEGIES: tuple[str, ...] = (
 )
 
 
+def _naive_utc(value: Optional[datetime]) -> Optional[datetime]:
+    """SQLite DateTime columns hold naive UTC; compare like with like."""
+    if value is None or value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
 class MarketRepository:
     """Repository for market data."""
 
@@ -60,6 +69,11 @@ class MarketRepository:
             # Backfill once the MarketBook reveals it (catalogue never does).
             if getattr(market, 'number_of_winners', None) is not None:
                 record.number_of_winners = market.number_of_winners
+            # Metadata a minimal at-bet record may have lacked.
+            if getattr(market, 'competition', None) and not record.competition:
+                record.competition = market.competition
+            if getattr(market, 'country_code', None) and not record.country_code:
+                record.country_code = market.country_code
         else:
             # Create new
             record = MarketRecord(
@@ -71,6 +85,7 @@ class MarketRepository:
                 start_time=market.start_time,
                 venue=market.venue,
                 country_code=market.country_code,
+                competition=getattr(market, 'competition', None),
                 status=market.status.value,
                 total_matched=market.total_matched,
                 event_id=getattr(market, 'event_id', None),
@@ -263,14 +278,12 @@ class BetRepository:
         """
         Get bets that should have their closing line refreshed this cycle.
 
-        We can't wait until settlement to snapshot price — Betfair drops
-        markets from list_market_book shortly after they close. So:
-
-          - OPEN bets (MATCHED): refresh every cycle so the last successful
-            snapshot before settlement becomes our "close" price.
-          - SETTLED bets: only if we never captured one (close_recorded_at
-            IS NULL). If their market is already gone, the next cycle will
-            silently skip; after max_age_days we drop them from the queue.
+        Only OPEN (MATCHED) bets are queued. The capture job refreshes them
+        every cycle while the market is still pre-off, and the last snapshot
+        before kick-off is the closing line. Settled bets are never queued:
+        their market is in-play or closed, and a price taken then is the
+        result, not the line — that is exactly how value_betting recorded
+        -49% CLV on a winner (close 1.02) until Sep 2026.
 
         Voided bets are excluded — CLV is meaningless for them.
 
@@ -299,13 +312,7 @@ class BetRepository:
             .where(BetRecord.placed_at >= cutoff)
             .where(BetRecord.strategy.notin_(IN_PLAY_ENTRY_STRATEGIES))
             .where(~BetRecord.strategy.like("nags%"))
-            .where(
-                or_(
-                    BetRecord.status == BetStatus.MATCHED.value,
-                    (BetRecord.status == BetStatus.SETTLED.value)
-                    & BetRecord.close_recorded_at.is_(None),
-                )
-            )
+            .where(BetRecord.status == BetStatus.MATCHED.value)
             .where(
                 or_(
                     BetRecord.result.is_(None),
@@ -316,6 +323,34 @@ class BetRepository:
             .limit(limit)
         )
         return list(result.scalars().all())
+
+    async def purge_post_off_clv(self) -> int:
+        """
+        Clear CLV readings that were captured after the market had started.
+
+        Until Sep 2026 the capture job kept refreshing through the match and
+        again after settlement, so the stored "close" was the final in-play
+        price. A capture is only a closing line if it was taken before the
+        market's start time; anything later is the result in disguise, and
+        the pre-off snapshot it overwrote cannot be recovered. Idempotent;
+        runs at startup. Returns the number of bets cleared.
+        """
+        result = await self.session.execute(
+            select(BetRecord, MarketRecord.start_time)
+            .join(MarketRecord, MarketRecord.id == BetRecord.market_id)
+            .where(BetRecord.close_recorded_at.is_not(None))
+        )
+        cleared = 0
+        for bet, start_time in result.all():
+            recorded = _naive_utc(bet.close_recorded_at)
+            start = _naive_utc(start_time)
+            if recorded is None or start is None or recorded <= start:
+                continue
+            bet.close_price = None
+            bet.clv_percent = None
+            bet.close_recorded_at = None
+            cleared += 1
+        return cleared
 
     async def get_settled_between(
         self,
@@ -336,6 +371,122 @@ class BetRepository:
             .order_by(BetRecord.settled_at.asc())
         )
         return list(result.scalars().all())
+
+
+class EvaluationRepository:
+    """Repository for the persisted strategy funnel (strategy_evaluations)."""
+
+    # Half-time can only be read while the feed says HalfTime, so HT rows are
+    # polled from 40 to 75 minutes after kick-off. Full-time from 95 minutes.
+    HT_WINDOW_MINUTES = (40, 75)
+    FT_AFTER_MINUTES = 95
+    MAX_AGE_HOURS = 24
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def upsert(
+        self,
+        *,
+        strategy: str,
+        market: Market,
+        stage: str,
+        outcome: str,
+        reason: str,
+        detail: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Record the latest verdict for (strategy, market, stage)."""
+        now = datetime.utcnow()
+        detail_json = json.dumps(detail, default=str) if detail else None
+
+        result = await self.session.execute(
+            select(StrategyEvaluationRecord).where(
+                StrategyEvaluationRecord.strategy == strategy,
+                StrategyEvaluationRecord.market_id == market.market_id,
+                StrategyEvaluationRecord.stage == stage,
+            )
+        )
+        record = result.scalar_one_or_none()
+
+        if record:
+            record.outcome = outcome
+            record.reason = reason
+            record.detail = detail_json
+            record.last_seen = now
+            record.evaluations = (record.evaluations or 0) + 1
+            if market.competition and not record.competition:
+                record.competition = market.competition
+            if market.country_code and not record.country_code:
+                record.country_code = market.country_code
+            if market.event_id and not record.event_id:
+                record.event_id = market.event_id
+            return
+
+        self.session.add(
+            StrategyEvaluationRecord(
+                strategy=strategy,
+                market_id=market.market_id,
+                stage=stage,
+                outcome=outcome,
+                reason=reason,
+                detail=detail_json,
+                event_name=market.event_name,
+                competition=market.competition,
+                country_code=market.country_code,
+                start_time=_naive_utc(market.start_time),
+                event_id=market.event_id,
+                first_seen=now,
+                last_seen=now,
+                evaluations=1,
+            )
+        )
+
+    async def get_pending_scores(
+        self, now: datetime, limit: int = 50
+    ) -> list[StrategyEvaluationRecord]:
+        """Rows whose match is in the HT window or past FT and still missing that score."""
+        now = _naive_utc(now) or now
+        ht_from = now - timedelta(minutes=self.HT_WINDOW_MINUTES[1])
+        ht_to = now - timedelta(minutes=self.HT_WINDOW_MINUTES[0])
+        ft_before = now - timedelta(minutes=self.FT_AFTER_MINUTES)
+        oldest = now - timedelta(hours=self.MAX_AGE_HOURS)
+
+        result = await self.session.execute(
+            select(StrategyEvaluationRecord)
+            .where(StrategyEvaluationRecord.event_id.is_not(None))
+            .where(StrategyEvaluationRecord.start_time >= oldest)
+            .where(
+                or_(
+                    StrategyEvaluationRecord.ht_home.is_(None)
+                    & StrategyEvaluationRecord.start_time.between(ht_from, ht_to),
+                    StrategyEvaluationRecord.ft_home.is_(None)
+                    & (StrategyEvaluationRecord.start_time <= ft_before),
+                )
+            )
+            .order_by(StrategyEvaluationRecord.start_time)
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def record_scores(
+        self,
+        record_id: int,
+        *,
+        ht: Optional[tuple[int, int]] = None,
+        ft: Optional[tuple[int, int]] = None,
+        checked_at: Optional[datetime] = None,
+    ) -> None:
+        """Store whichever of the HT / FT scores were observed this pass."""
+        values: dict[str, Any] = {"scores_checked_at": _naive_utc(checked_at) or datetime.utcnow()}
+        if ht is not None:
+            values["ht_home"], values["ht_away"] = ht
+        if ft is not None:
+            values["ft_home"], values["ft_away"] = ft
+        await self.session.execute(
+            update(StrategyEvaluationRecord)
+            .where(StrategyEvaluationRecord.id == record_id)
+            .values(**values)
+        )
 
 
 class BankrollRepository:

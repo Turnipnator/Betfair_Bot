@@ -193,6 +193,7 @@ class LayTheDrawStrategy(BaseStrategy):
         # EXCEPTION: Champions League (high quality matches, good liquidity)
         home_goals_avg = 0.0
         away_goals_avg = 0.0
+        is_european = False
 
         if market.event_name and " v " in market.event_name:
             parts = market.event_name.split(" v ")
@@ -204,6 +205,7 @@ class LayTheDrawStrategy(BaseStrategy):
                         "LTD: Skipping youth/reserve game",
                         market=market.event_name,
                     )
+                    await self.record_evaluation(market, "prematch", "rejected", "youth_reserve")
                     return None
 
                 # Check if this is a Champions League match (bypass stats requirement)
@@ -229,6 +231,10 @@ class LayTheDrawStrategy(BaseStrategy):
                                 league=league_stats.league_code,
                                 tier=league_tier,
                             )
+                            await self.record_evaluation(
+                                market, "prematch", "rejected", "league_tier",
+                                league=league_stats.league_code, tier=league_tier,
+                            )
                             return None
 
                         home_goals_avg = home_stats.home_scored_avg if home_stats.home_played >= 3 else 0
@@ -244,6 +250,12 @@ class LayTheDrawStrategy(BaseStrategy):
                                 home_goals_avg=f"{home_goals_avg:.2f}",
                                 min_required=self.MIN_HOME_GOALS_AVG,
                             )
+                            await self.record_evaluation(
+                                market, "prematch", "rejected", "home_goals",
+                                league=league_stats.league_code,
+                                home_goals_avg=round(home_goals_avg, 2),
+                                prior_weight=round(home_stats.prior_weight, 2),
+                            )
                             return None
 
                         # Away team must also contribute goals
@@ -254,6 +266,13 @@ class LayTheDrawStrategy(BaseStrategy):
                                 away_goals_avg=f"{away_goals_avg:.2f}",
                                 min_required=self.MIN_AWAY_GOALS_AVG,
                             )
+                            await self.record_evaluation(
+                                market, "prematch", "rejected", "away_goals",
+                                league=league_stats.league_code,
+                                home_goals_avg=round(home_goals_avg, 2),
+                                away_goals_avg=round(away_goals_avg, 2),
+                                prior_weight=round(away_stats.prior_weight, 2),
+                            )
                             return None
 
                         # Home team must be solid defensively (reduces draw probability)
@@ -263,6 +282,14 @@ class LayTheDrawStrategy(BaseStrategy):
                                 market=market.event_name,
                                 home_conceded_avg=f"{home_conceded_avg:.2f}",
                                 max_allowed=self.MAX_HOME_CONCEDED_AVG,
+                            )
+                            await self.record_evaluation(
+                                market, "prematch", "rejected", "home_conceded",
+                                league=league_stats.league_code,
+                                home_goals_avg=round(home_goals_avg, 2),
+                                away_goals_avg=round(away_goals_avg, 2),
+                                home_conceded_avg=round(home_conceded_avg, 2),
+                                prior_weight=round(home_stats.prior_weight, 2),
                             )
                             return None
 
@@ -278,15 +305,18 @@ class LayTheDrawStrategy(BaseStrategy):
                             "LTD: Skipping - no football-data.co.uk coverage",
                             market=market.event_name,
                         )
+                        await self.record_evaluation(market, "prematch", "rejected", "no_stats")
                         return None
 
         # Find the draw selection
         draw_runner = self._find_draw_runner(market)
         if not draw_runner:
+            await self.record_evaluation(market, "prematch", "rejected", "no_draw_runner")
             return None
 
         # Check pre-match draw odds are in sensible range
         if not draw_runner.best_lay_price:
+            await self.record_evaluation(market, "prematch", "rejected", "no_draw_price")
             return None
 
         draw_odds = draw_runner.best_lay_price
@@ -296,6 +326,10 @@ class LayTheDrawStrategy(BaseStrategy):
                 market=market.event_name,
                 draw_odds=draw_odds,
                 range=f"{self.MIN_PREMATCH_DRAW_ODDS}-{self.MAX_PREMATCH_DRAW_ODDS}",
+            )
+            await self.record_evaluation(
+                market, "prematch", "rejected", "draw_odds_range",
+                draw_odds=draw_odds, european=is_european,
             )
             return None
 
@@ -309,6 +343,11 @@ class LayTheDrawStrategy(BaseStrategy):
                 max_allowed=self.MAX_FAVOURITE_ODDS,
                 draw_odds=draw_odds,
             )
+            await self.record_evaluation(
+                market, "prematch", "rejected", "no_clear_favourite",
+                draw_odds=draw_odds, favourite_odds=favourite_odds, european=is_european,
+                home_goals_avg=round(home_goals_avg, 2), away_goals_avg=round(away_goals_avg, 2),
+            )
             return None
 
         # Priority 3: Liquidity filter
@@ -318,6 +357,11 @@ class LayTheDrawStrategy(BaseStrategy):
                 market=market.event_name,
                 matched=f"£{market.total_matched:,.0f}",
                 min_required=f"£{MIN_MARKET_LIQUIDITY:,.0f}",
+            )
+            await self.record_evaluation(
+                market, "prematch", "rejected", "liquidity",
+                total_matched=round(market.total_matched), draw_odds=draw_odds,
+                favourite_odds=favourite_odds, european=is_european,
             )
             return None
 
@@ -341,6 +385,12 @@ class LayTheDrawStrategy(BaseStrategy):
             draw_odds=draw_odds,
             favourite_odds=favourite_odds,
             liquidity=f"£{market.total_matched:,.0f}",
+        )
+        await self.record_evaluation(
+            market, "prematch", "candidate", "stored",
+            draw_odds=draw_odds, favourite_odds=favourite_odds,
+            total_matched=round(market.total_matched), european=is_european,
+            home_goals_avg=round(home_goals_avg, 2), away_goals_avg=round(away_goals_avg, 2),
         )
 
         # Never return a signal from evaluate — entry is via evaluate_halftime
@@ -387,6 +437,11 @@ class LayTheDrawStrategy(BaseStrategy):
                 score=f"{match_state.home_score}-{match_state.away_score}",
             )
             del self._candidates[market.market_id]
+            await self.record_evaluation(
+                market, "halftime", "dropped", "goal_before_ht",
+                score=f"{match_state.home_score}-{match_state.away_score}",
+                match_time=match_state.match_time,
+            )
             return None
 
         # Must be around half-time or early second half (40-65 mins)
@@ -410,6 +465,11 @@ class LayTheDrawStrategy(BaseStrategy):
                 draw_odds=draw_odds,
                 range=f"{MIN_HT_DRAW_ODDS}-{MAX_HT_DRAW_ODDS}",
             )
+            await self.record_evaluation(
+                market, "halftime", "rejected", "ht_odds_range",
+                draw_odds=draw_odds, match_time=match_time,
+                total_matched=round(market.total_matched),
+            )
             return None
 
         # Remove from candidates — we're entering
@@ -430,6 +490,7 @@ class LayTheDrawStrategy(BaseStrategy):
             market_name=market.market_name or candidate.market_name,
             event_name=market.event_name or candidate.event_name,
             competition=market.competition or candidate.competition,
+            country_code=market.country_code,
             reason=f"LTD HT entry: Draw @ {draw_odds:.2f} (0-0 at {match_time}')",
             market_start_time=market.start_time or candidate.start_time,
             event_id=market.event_id or candidate.event_id,
@@ -442,6 +503,12 @@ class LayTheDrawStrategy(BaseStrategy):
             match_time=match_time,
             liability=f"£{stake * (draw_odds - 1):.2f}",
         )
+        await self.record_evaluation(
+            market, "halftime", "entered", "ht_entry",
+            draw_odds=draw_odds, match_time=match_time,
+            total_matched=round(market.total_matched),
+            favourite_odds=candidate.favourite_odds,
+        )
 
         self.log_signal(signal)
         return signal
@@ -450,7 +517,7 @@ class LayTheDrawStrategy(BaseStrategy):
         """Get current candidates waiting for HT entry."""
         return self._candidates
 
-    def cleanup_expired_candidates(self) -> int:
+    async def cleanup_expired_candidates(self) -> int:
         """Remove candidates for matches that have been going too long (>70 mins)."""
         now = datetime.now(timezone.utc)
         expired = []
@@ -464,11 +531,26 @@ class LayTheDrawStrategy(BaseStrategy):
                 if elapsed_mins > 80:
                     expired.append(market_id)
         for market_id in expired:
+            candidate = self._candidates.pop(market_id)
             logger.info(
                 "LTD: Candidate expired",
-                market=self._candidates[market_id].event_name,
+                market=candidate.event_name,
             )
-            del self._candidates[market_id]
+            # No live Market object here; a shell carrying the candidate's
+            # identity is enough for the funnel row.
+            await self.record_evaluation(
+                Market(
+                    market_id=market_id,
+                    market_name=candidate.market_name or "Match Odds",
+                    event_name=candidate.event_name,
+                    sport=Sport.FOOTBALL,
+                    market_type="MATCH_ODDS",
+                    start_time=candidate.start_time or now,
+                    competition=candidate.competition,
+                    event_id=candidate.event_id,
+                ),
+                "halftime", "dropped", "expired",
+            )
         return len(expired)
 
     def manage_position(

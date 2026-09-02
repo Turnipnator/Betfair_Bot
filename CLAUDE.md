@@ -276,6 +276,42 @@ reconciliation it had already aged out — permanently unsettleable.
 
 ---
 
+## Football data, the strategy funnel, and CLV (2 Sep 2026)
+
+### Stats are season-aware and blended
+
+`src/data/football_data.py` derives the season from the date (July rollover)
+and fetches **this season plus last season**, blending them per team and per
+home/away split with a prior-season weight of `max(0, 1 − games/10)`. Until
+2 Sep 2026 the URLs were hard-coded to 2025/26, Denmark to 2024/25 and
+Understat to 2024/25, so every LTD goals filter and every Poisson input was a
+finished season's average that never rolled over. `TeamStats` counts are
+floats for this reason; `home_played` of 17.2 is 2 real games plus 0.8 of
+last season's 19. Pre-season (empty current file) last season is used whole;
+once a round is played the team list is this season's, so relegated sides
+drop out. `match_results` are this season's only — a year-old result must
+never settle a bet. Understat follows the same rule. `tests/test_season_blend.py`.
+
+### The funnel is persisted
+
+Strategies call `record_evaluation(market, stage, outcome, reason, **detail)`
+at every decision point; the engine's sink writes one row per
+(strategy, market, stage) to `strategy_evaluations`, keeping the *latest*
+verdict and the numbers behind it. `enrich_evaluations` (every 2 min) fills
+`ht_*`/`ft_*` scores from the in-play feed (HT only while the feed says
+HalfTime) with football-data.co.uk as the FT fallback. So "would loosening the
+favourite filter have paid" is a query, not a two-day log window. LTD is
+instrumented; new strategies should be. `tests/test_ltd_funnel.py`.
+
+### CLV is pre-off only
+
+`record_closing_lines` snapshots open bets only while
+`closing_line_capturable(market)` (open, not in-play); the last pre-off
+snapshot is the closing line. Settled bets are never queued, and readings
+taken after kick-off are purged at startup. Until this fix the job refreshed
+through the match and after settlement, so the "close" was the final in-play
+price (1.02 on a winner, −49% CLV). `tests/test_clv_preoff.py`.
+
 ## Telegram Commands
 
 Essential commands:

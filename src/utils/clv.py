@@ -8,7 +8,7 @@ indicator of true edge, independent of bet-by-bet win/loss variance.
   LAY bet:  positive CLV when close_price < matched_odds (we laid it high)
 """
 
-from typing import Optional
+from typing import Any, Optional
 
 
 def compute_clv_percent(
@@ -34,3 +34,21 @@ def compute_clv_percent(
     if bet_type == "LAY":
         return (matched_odds - close_price) / matched_odds * 100.0
     return None
+
+
+def closing_line_capturable(market: Any) -> bool:
+    """
+    True while `market` still has a closing line to capture: open, not in-play.
+
+    Once a market turns in-play, last_price_traded tracks the match rather
+    than the line, and after the off it is simply the result (1.02 on the
+    winner). Snapshotting then does not measure anything about the bet, so
+    the capture job stops at kick-off and the last pre-off snapshot stands.
+    """
+    if market is None:
+        return False
+    if getattr(market, "in_play", False):
+        return False
+    status = getattr(market, "status", None)
+    status_value = getattr(status, "value", status)
+    return status_value in (None, "OPEN")

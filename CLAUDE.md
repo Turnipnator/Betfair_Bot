@@ -224,7 +224,16 @@ can never exhaust the budget and lock the live win leg out of a real bet.
 
 ### Settlement
 
-- **Live** HR bets settle from Betfair cleared orders (`reconcile_with_betfair`).
+- **Live** HR bets settle from Betfair cleared orders (`reconcile_with_betfair`),
+  queried under **all four** terminal statuses. Betfair files a void (non-runner,
+  abandoned) under `VOIDED`, an unmatched bet that lapsed at the off under
+  `LAPSED`, a cancellation under `CANCELLED`; none of them ever appear in a
+  `SETTLED` query. Until 13 Sep 2026 only `SETTLED` was fetched, so a live
+  `nags_place` bet on a withdrawn horse sat `MATCHED` for four days. Each order
+  carries `bet_status`; anything but `SETTLED` voids the bet. An open live bet
+  older than 24h that Betfair holds neither as cleared nor as current is
+  **alerted** on Telegram once a day, never settled on a guess.
+  `tests/test_reconcile_cleared_statuses.py`.
 - **Paper** HR bets settle from the Racing API (`_settle_horse_racing_bets`),
   which is scoped to `PAPER-` refs so it never overwrites a live settlement.
 - **Place** bets win on `finishing position <= places`. Betfair exposes

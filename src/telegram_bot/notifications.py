@@ -109,6 +109,18 @@ class Notifier:
     # HIGH priority notifications
     # ==========================================================================
 
+    async def stuck_bet(self, bet: Bet, hours_old: float) -> bool:
+        """A live bet Betfair has no cleared or current record of. Needs a human."""
+        text = (
+            f"<b>STUCK BET</b>\n\n"
+            f"{bet.strategy} {bet.bet_type.value} {bet.selection_name or '?'}\n"
+            f"Ref: {bet.bet_ref}  (DB id {bet.id})\n"
+            f"Open for {hours_old:.0f}h and Betfair has no cleared or current "
+            f"record of it.\n\n"
+            f"Check the market and settle or void it by hand."
+        )
+        return await self._send(text, NotificationPriority.HIGH)
+
     async def bet_placed(self, bet: Bet) -> bool:
         """Notify that a bet has been placed."""
         mode = "PAPER" if bet.is_paper else "LIVE"

@@ -58,6 +58,10 @@ class MatchState:
 
 logger = get_logger(__name__)
 
+# Every terminal betStatus listClearedOrders knows. A bet ends up in exactly
+# one of these; reconciliation must look in all four.
+CLEARED_BET_STATUSES: tuple[str, ...] = ("SETTLED", "VOIDED", "LAPSED", "CANCELLED")
+
 # betfairlightweight defaults BaseEndpoint.connect_timeout to 3.05s, which
 # Betfair's API regularly exceeds under load. The result is a stream of
 # "Read timed out. (read timeout=3.05)" errors, failed keep-alives, and
@@ -607,17 +611,25 @@ class BetfairClient:
     async def get_cleared_orders(
         self,
         from_hours: int = 24,
-        settled_only: bool = True,
+        statuses: tuple[str, ...] = CLEARED_BET_STATUSES,
     ) -> list[dict]:
         """
-        Get cleared (settled) orders from Betfair.
+        Get cleared orders from Betfair across every terminal bet status.
 
         This is the definitive source for bet settlement in live trading.
         Returns actual P&L from Betfair's records.
 
+        Betfair files a voided bet (non-runner, abandoned race) under
+        ``VOIDED``, an unmatched bet that lapsed at the off under ``LAPSED``
+        and a cancelled one under ``CANCELLED`` — none of them ever appear in
+        a ``SETTLED`` query. Until 13 Sep 2026 only ``SETTLED`` was fetched,
+        so a live bet on a withdrawn horse (Spring Bloom, Goodwood 8 Sep)
+        stayed MATCHED in the database for good. Each returned order carries
+        ``bet_status`` so the caller can tell the cases apart.
+
         Args:
             from_hours: How far back to look (default 24 hours)
-            settled_only: Only return fully settled orders
+            statuses: Betfair betStatus values to query, one call each.
 
         Returns:
             List of cleared order records with settlement details.
@@ -626,29 +638,40 @@ class BetfairClient:
             logger.error("Not logged in to Betfair")
             return []
 
-        try:
-            loop = asyncio.get_event_loop()
+        loop = asyncio.get_event_loop()
+        from_time = datetime.utcnow() - timedelta(hours=from_hours)
+        to_time = datetime.utcnow()
+        date_range = {
+            "from": from_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "to": to_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
 
-            # Time range for settled orders
-            from_time = datetime.utcnow() - timedelta(hours=from_hours)
-            to_time = datetime.utcnow()
+        orders: list[dict] = []
+        counts: dict[str, int] = {}
+        for status in statuses:
+            try:
+                cleared = await loop.run_in_executor(
+                    None,
+                    lambda st=status: self._client.betting.list_cleared_orders(
+                        bet_status=st,
+                        settled_date_range=date_range,
+                    ),
+                )
+            except APIError as e:
+                logger.error("Error fetching cleared orders", bet_status=status, error=str(e))
+                continue
+            except Exception as e:
+                logger.error(
+                    "Unexpected error fetching cleared orders", bet_status=status, error=str(e)
+                )
+                continue
 
-            # Fetch cleared orders
-            cleared = await loop.run_in_executor(
-                None,
-                lambda: self._client.betting.list_cleared_orders(
-                    bet_status="SETTLED" if settled_only else "ALL",
-                    settled_date_range={
-                        "from": from_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                        "to": to_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    },
-                ),
-            )
-
-            orders = []
-            for order in cleared.orders if hasattr(cleared, 'orders') else []:
+            batch = cleared.orders if hasattr(cleared, "orders") else []
+            counts[status] = len(batch)
+            for order in batch:
                 orders.append({
                     "bet_id": order.bet_id,
+                    "bet_status": status,
                     "market_id": order.market_id,
                     "selection_id": order.selection_id,
                     "side": order.side,  # BACK or LAY
@@ -656,24 +679,45 @@ class BetfairClient:
                     "price_matched": order.price_matched,
                     "size_settled": order.size_settled,
                     "profit": order.profit,  # Net P&L after commission
-                    "commission": order.commission if hasattr(order, 'commission') else 0,
+                    "commission": order.commission if hasattr(order, "commission") else 0,
                     "settled_date": order.settled_date,
                     "bet_outcome": order.bet_outcome,  # WON, LOST, or None
                 })
 
-            logger.info(
-                "Fetched cleared orders from Betfair",
-                count=len(orders),
-                from_hours=from_hours,
-            )
-            return orders
+        logger.info(
+            "Fetched cleared orders from Betfair",
+            count=len(orders),
+            by_status=counts,
+            from_hours=from_hours,
+        )
+        return orders
 
-        except APIError as e:
-            logger.error("Error fetching cleared orders", error=str(e))
-            return []
+    async def current_order_ids(self, bet_ids: list[str]) -> Optional[set[str]]:
+        """
+        Which of `bet_ids` Betfair still holds as current (unsettled) orders.
+
+        Returns None when the lookup itself failed, so a caller can tell
+        "Betfair has no such order" from "we could not ask" — the first is a
+        phantom to flag, the second is a reason to wait.
+        """
+        if not self.is_logged_in or not bet_ids:
+            return None
+        try:
+            loop = asyncio.get_event_loop()
+            found: set[str] = set()
+            # The API caps betIds per request; 200 is comfortably inside it.
+            for i in range(0, len(bet_ids), 200):
+                chunk = [str(b) for b in bet_ids[i:i + 200]]
+                orders = await loop.run_in_executor(
+                    None,
+                    lambda c=chunk: self._client.betting.list_current_orders(bet_ids=c),
+                )
+                for order in (orders.orders if orders and orders.orders else []):
+                    found.add(str(order.bet_id))
+            return found
         except Exception as e:
-            logger.error("Unexpected error fetching cleared orders", error=str(e))
-            return []
+            logger.warning("Error listing current orders", error=str(e))
+            return None
 
     async def get_match_state(self, event_id: int) -> Optional[MatchState]:
         """

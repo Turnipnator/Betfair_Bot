@@ -1522,10 +1522,12 @@ class PaperTradingEngine:
 
             reconciled_count = 0
 
+            unresolved: list = []
             for bet in bets_with_ref:
                 # Check if this bet has been settled by Betfair
                 cleared = cleared_by_id.get(str(bet.bet_ref))
                 if not cleared:
+                    unresolved.append(bet)
                     continue
 
                 # Get event_name for notification if not already set
@@ -1541,11 +1543,15 @@ class PaperTradingEngine:
 
                 # Determine result from Betfair's data
                 bet_outcome = cleared.get("bet_outcome")
+                bet_status = cleared.get("bet_status", "SETTLED")
                 profit = cleared.get("profit") or 0.0
                 commission = cleared.get("commission") or 0.0
 
-                # Handle voided bets (outcome is neither WON nor LOST)
-                if bet_outcome not in ("WON", "LOST"):
+                # VOIDED (non-runner, abandoned), LAPSED (never matched, lapsed
+                # at the off) and CANCELLED all mean no money changed hands:
+                # void the bet. A SETTLED order without WON/LOST is treated
+                # the same way rather than guessed at.
+                if bet_status != "SETTLED" or bet_outcome not in ("WON", "LOST"):
                     # Void the bet
                     if self._simulator.void_bet(bet.id):
                         # Remove from tracking
@@ -1573,6 +1579,7 @@ class PaperTradingEngine:
                         logger.info(
                             "Bet voided via Betfair reconciliation",
                             bet_ref=bet.bet_ref,
+                            bet_status=bet_status,
                             outcome=bet_outcome,
                         )
                         reconciled_count += 1
@@ -1644,8 +1651,63 @@ class PaperTradingEngine:
                     reconciled=reconciled_count,
                 )
 
+            await self._flag_bets_unknown_to_betfair(unresolved)
+
         except Exception as e:
             logger.error("Error reconciling with Betfair", error=str(e))
+
+    # A live bet Betfair has no record of — not cleared under any status inside
+    # the window, not a current order — cannot settle by itself. Alert once a
+    # day per bet so it gets looked at; never settle it on a guess.
+    STUCK_BET_MIN_AGE_HOURS = 24
+    STUCK_BET_REALERT_HOURS = 24
+
+    async def _flag_bets_unknown_to_betfair(self, bets: list) -> None:
+        """Warn and alert on open live bets Betfair does not know about."""
+        if not bets:
+            return
+        now = datetime.now(timezone.utc)
+
+        def age_hours(b) -> float:
+            placed = b.placed_at
+            if placed is None:
+                return 0.0
+            if placed.tzinfo is None:
+                placed = placed.replace(tzinfo=timezone.utc)
+            return (now - placed).total_seconds() / 3600
+
+        aged = [b for b in bets if age_hours(b) >= self.STUCK_BET_MIN_AGE_HOURS]
+        if not aged:
+            return
+
+        current = await betfair_client.current_order_ids([str(b.bet_ref) for b in aged])
+        if current is None:
+            logger.warning(
+                "Could not check current orders for aged open bets; will retry",
+                bet_refs=[b.bet_ref for b in aged],
+            )
+            return
+
+        alerted = getattr(self, "_stuck_bet_alerted", None)
+        if alerted is None:
+            alerted = self._stuck_bet_alerted = {}
+
+        for bet in aged:
+            if str(bet.bet_ref) in current:
+                continue  # Betfair still holds it; it will clear in due course
+            hours = age_hours(bet)
+            logger.warning(
+                "Open live bet unknown to Betfair",
+                bet_ref=bet.bet_ref,
+                bet_id=bet.id,
+                strategy=bet.strategy,
+                selection=bet.selection_name,
+                hours_old=f"{hours:.0f}",
+            )
+            last = alerted.get(bet.bet_ref)
+            if last is None or (now - last).total_seconds() >= self.STUCK_BET_REALERT_HOURS * 3600:
+                alerted[bet.bet_ref] = now
+                await notifier.stuck_bet(bet, hours)
 
     async def record_closing_lines(self) -> None:
         """

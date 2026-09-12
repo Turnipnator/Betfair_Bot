@@ -146,10 +146,31 @@ async def run():
         await s.evaluate(make_market(market_id="1.5"))
         with patch.object(ltd_module.betfair_client, "get_match_state", new=AsyncMock(return_value=ht_state())):
             records.clear()
-            sig = await s.evaluate_halftime(make_market(market_id="1.5", draw_lay=3.2, in_play=True))
+            sig = await s.evaluate_halftime(make_market(market_id="1.5", draw_lay=3.4, in_play=True))
             check("HT odds out of range: no signal", sig, None)
             check("HT odds out of range: recorded", last()["reason"], "ht_odds_range")
+            check("HT odds out of range: status kept", last()["detail"]["status"], "HalfTime")
             check("HT odds out of range: candidate kept", "1.5" in s.get_candidates(), True)
+
+        # Cap raised 2.8 -> 3.2 on 12 Sep 2026: a 0-0 HT draw for this profile
+        # trades ~2.9-3.2 at the whistle, and the old cap made the bot wait into
+        # the second half. 3.0 at HalfTime must now enter, and say it did so at HT.
+        print("half-time cap")
+        check("cap is 3.2", ltd_module.MAX_HT_DRAW_ODDS, 3.2)
+        await s.evaluate(make_market(market_id="1.55"))
+        with patch.object(ltd_module.betfair_client, "get_match_state", new=AsyncMock(return_value=ht_state())):
+            records.clear()
+            sig = await s.evaluate_halftime(make_market(market_id="1.55", draw_lay=3.0, in_play=True))
+            check("3.0 at the whistle: signal", sig is not None and sig.odds == 3.0, True)
+            check("3.0 at the whistle: entered", (last()["outcome"], last()["reason"]), ("entered", "ht_entry"))
+            check("3.0 at the whistle: status recorded", last()["detail"]["status"], "HalfTime")
+        await s.evaluate(make_market(market_id="1.56"))
+        with patch.object(ltd_module.betfair_client, "get_match_state",
+                          new=AsyncMock(return_value=ht_state(status="InProgress", minute=52))):
+            records.clear()
+            sig = await s.evaluate_halftime(make_market(market_id="1.56", draw_lay=2.78, in_play=True))
+            check("second-half entry still allowed inside 40-65'", sig is not None, True)
+            check("second-half entry: status says so", last()["detail"]["status"], "InProgress")
 
         print("expiry")
         await s.evaluate(make_market(market_id="1.6", start_in_hours=-2.0))

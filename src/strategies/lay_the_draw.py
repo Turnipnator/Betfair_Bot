@@ -45,7 +45,13 @@ EUROPEAN_COMPETITIONS = [
 # Lower = market thinks draw likely (defensive game) → avoid
 # Higher = market thinks goal coming → good
 MIN_HT_DRAW_ODDS = 1.9
-MAX_HT_DRAW_ODDS = 2.8
+# 3.2, not 2.8 (raised 12 Sep 2026). A 0-0 half-time draw for the candidate
+# profile trades at ~2.9-3.2 at the whistle, so a 2.8 cap made the bot sit
+# through the interval and enter around 50-56' once the price drifted under
+# it: 30 of the first 35 v2 entries were matched at 2.7-2.8. The wait dropped
+# candidates that scored just after the restart — the very outcome a draw lay
+# wants. Liability per £10 rises from ~£17.50 to ~£22 at the cap.
+MAX_HT_DRAW_ODDS = 3.2
 
 # Minimum market liquidity (total matched on market) to ensure fair exit prices
 MIN_MARKET_LIQUIDITY = 15_000  # £15k
@@ -468,6 +474,7 @@ class LayTheDrawStrategy(BaseStrategy):
             await self.record_evaluation(
                 market, "halftime", "rejected", "ht_odds_range",
                 draw_odds=draw_odds, match_time=match_time,
+                status=match_state.status,
                 total_matched=round(market.total_matched),
             )
             return None
@@ -503,9 +510,12 @@ class LayTheDrawStrategy(BaseStrategy):
             match_time=match_time,
             liability=f"£{stake * (draw_odds - 1):.2f}",
         )
+        # status says whether we got in at the whistle or in the second half;
+        # the cap is judged on that split.
         await self.record_evaluation(
             market, "halftime", "entered", "ht_entry",
             draw_odds=draw_odds, match_time=match_time,
+            status=match_state.status,
             total_matched=round(market.total_matched),
             favourite_odds=candidate.favourite_odds,
         )

@@ -30,7 +30,16 @@ logger = get_logger(__name__)
 # games' worth of noise, and in April they should not run on last year's table.
 # ---------------------------------------------------------------------------
 
-FOOTBALL_DATA_BASE = "https://www.football-data.co.uk"
+# The bare domain, not www: from 12 Sep 2026 the site 302-redirects
+# www.football-data.co.uk/... to football-data.co.uk/..., and a client that
+# does not follow redirects sees every league file as a failure. The client
+# below follows redirects as well, so a move in the other direction is
+# harmless too.
+FOOTBALL_DATA_BASE = "https://football-data.co.uk"
+
+# After a league refresh fails, keep serving the cached copy and do not retry
+# for this long. Without it a site outage would be re-tried on every scan.
+REFRESH_RETRY_BACKOFF = timedelta(minutes=15)
 
 # A new season's files appear on the site from July. Until then "current"
 # still means the season that has just finished.
@@ -349,6 +358,9 @@ class LeagueStats:
     season_start_year: Optional[int] = None
     # League-level prior-season weight that went into the totals (0.0 = none).
     prior_weight: float = 0.0
+    # Matches from the current season's file (0.0 pre-season, or when the
+    # current file could not be fetched and only the prior season was used).
+    current_season_matches: float = 0.0
 
     @property
     def avg_home_goals(self) -> float:
@@ -557,7 +569,10 @@ class FootballDataService:
         """
         self._cache: dict[str, LeagueStats] = {}
         self._cache_duration = timedelta(hours=cache_duration_hours)
-        self._client = httpx.AsyncClient(timeout=10.0)  # Short timeout to prevent blocking
+        # follow_redirects: see FOOTBALL_DATA_BASE. Short timeout to prevent blocking.
+        self._client = httpx.AsyncClient(timeout=10.0, follow_redirects=True)
+        # League -> earliest time to retry after a failed refresh.
+        self._refresh_retry_at: dict[str, datetime] = {}
         # A finished season never changes, so its parsed stats live for the
         # process. Keyed by (league, start_year).
         self._prior_cache: dict[tuple[str, int], LeagueStats] = {}
@@ -752,8 +767,104 @@ class FootballDataService:
             "aris thessaloniki": "aris",
         }
 
-        normalized = name.lower().strip()
-        return name_mappings.get(normalized, normalized)
+        # Betfair spellings seen in the LTD funnel (2–12 Sep 2026) that had no
+        # entry and so fell into no_stats — 57 tier-1/2 fixtures in ten days.
+        # Keys are Betfair's form, values football-data.co.uk's, lower-cased.
+        # Some earlier entries pointed at names the files do not use
+        # (Sporting -> "sporting" where the file says "Sp Lisbon"); those are
+        # corrected here. tests/test_team_aliases.py locks every pair.
+        name_mappings.update({
+            # England / Scotland
+            "nottm forest": "nottingham forest",
+            "sheff utd": "sheffield united",
+            "sheff wed": "sheffield weds",
+            "dundee utd": "dundee united",
+            "inverness ct": "inverness c",
+            "inverness caledonian thistle": "inverness c",
+            "raith": "raith rvs",
+            "raith rovers": "raith rvs",
+            # Spain
+            "espanyol": "espanol",
+            "rcd espanyol": "espanol",
+            "deportivo": "la coruna",
+            "deportivo la coruna": "la coruna",
+            "dep. la coruna": "la coruna",
+            "racing santander": "santander",
+            "sporting gijon": "sp gijon",
+            "celta vigo b": "celta b",
+            "real sociedad b": "sociedad b",
+            # Germany
+            "mgladbach": "m'gladbach",
+            "m'gladbach": "m'gladbach",
+            "hamburger sv": "hamburg",
+            "hamburg sv": "hamburg",
+            "hsv": "hamburg",
+            "arminia bielefeld": "bielefeld",
+            "dynamo dresden": "dresden",
+            # Italy
+            "entella": "virtus entella",
+            "lr vicenza virtus": "vicenza",
+            "lr vicenza": "vicenza",
+            "vicenza virtus": "vicenza",
+            # France
+            "paris st-g": "paris sg",
+            "paris st g": "paris sg",
+            "estac troyes": "troyes",
+            # Portugal
+            "sporting": "sp lisbon",
+            "sporting cp": "sp lisbon",
+            "sporting lisbon": "sp lisbon",
+            "braga": "sp braga",
+            "sc braga": "sp braga",
+            "estoril praia": "estoril",
+            "academico de viseu": "academico viseu",
+            "cd nacional funchal": "nacional",
+            "nacional funchal": "nacional",
+            "club football estrela": "estrela",
+            "estrela amadora": "estrela",
+            # Netherlands
+            "nec nijmegen": "nijmegen",
+            "nec": "nijmegen",
+            "fortuna sittard": "for sittard",
+            "fortuna": "for sittard",
+            "ado den haag": "den haag",
+            "cambuur leeuwarden": "cambuur",
+            "pec zwolle": "zwolle",
+            # Denmark
+            "agf": "aarhus",
+            "agf aarhus": "aarhus",
+            "aarhus gf": "aarhus",
+            "ob": "odense",
+            "odense bk": "odense",
+            "ob odense": "odense",
+        })
+
+        normalized = " ".join(name.lower().split())
+        normalized = name_mappings.get(normalized, normalized)
+        # Club-type affixes carry no identity and the two sources disagree on
+        # them constantly (FC Heidenheim / Heidenheim, Pau / Pau FC, AD Ceuta
+        # FC / Ceuta). Strip them from both sides, then let an alias apply to
+        # the stripped form too.
+        stripped = self._strip_club_affixes(normalized)
+        return name_mappings.get(stripped, stripped)
+
+    # Leading tokens that are club-type labels, not names.
+    _AFFIX_PREFIXES = frozenset({
+        "fc", "sc", "ac", "cd", "ad", "sv", "us", "vfl", "vfb", "afc", "cf",
+        "ud", "sd", "calcio", "ssd", "lr", "rcd", "rc", "cs",
+    })
+    # Trailing tokens of the same kind.
+    _AFFIX_SUFFIXES = frozenset({"fc", "sc", "cf", "ssd", "calcio", "bk", "if", "fk", "sk"})
+
+    @classmethod
+    def _strip_club_affixes(cls, normalized: str) -> str:
+        """Drop club-type prefixes/suffixes, never emptying the name."""
+        tokens = normalized.split()
+        while len(tokens) > 1 and tokens[0] in cls._AFFIX_PREFIXES:
+            tokens.pop(0)
+        while len(tokens) > 1 and tokens[-1] in cls._AFFIX_SUFFIXES:
+            tokens.pop()
+        return " ".join(tokens)
 
     async def _download(self, url: str) -> Optional[str]:
         """Fetch a CSV, returning None on any failure (logged, never raised)."""
@@ -827,7 +938,13 @@ class FootballDataService:
 
         stats = blend_league_stats(current, prior, BLEND_FULL_GAMES)
         stats.season_start_year = start_year
+        stats.current_season_matches = current.total_matches if current else 0.0
         stats.last_updated = datetime.utcnow()
+        if current is None:
+            logger.warning(
+                "Current season file unavailable; using prior season only",
+                league=league_code, season=season_code(start_year),
+            )
 
         logger.info(
             "Fetched league data",
@@ -852,18 +969,49 @@ class FootballDataService:
         Returns:
             LeagueStats or None
         """
-        # Check cache
-        if not force_refresh and league_code in self._cache:
-            cached = self._cache[league_code]
-            if cached.last_updated and datetime.utcnow() - cached.last_updated < self._cache_duration:
+        now = datetime.utcnow()
+        cached = self._cache.get(league_code)
+        if not force_refresh and cached is not None:
+            if cached.last_updated and now - cached.last_updated < self._cache_duration:
                 return cached
+            retry_at = self._refresh_retry_at.get(league_code)
+            if retry_at and now < retry_at:
+                return cached  # a refresh failed recently; serve stale, do not hammer
 
         # Fetch fresh data
         stats = await self.fetch_league_data(league_code)
-        if stats:
-            self._cache[league_code] = stats
 
-        return stats
+        # A refresh that lost this season's file (current_season_matches
+        # dropped to 0 within the same season) is a failure too: last season
+        # whole is worse than the blend we already hold. Serve the cached copy
+        # and back off. Until 12 Sep 2026 a failed refresh returned None even
+        # with a good copy in memory, turning a site hiccup into no_stats for
+        # every domestic fixture.
+        lost_current = (
+            stats is not None
+            and cached is not None
+            and stats.season_start_year == cached.season_start_year
+            and stats.current_season_matches == 0
+            and cached.current_season_matches > 0
+        )
+        if stats is not None and not lost_current:
+            self._cache[league_code] = stats
+            self._refresh_retry_at.pop(league_code, None)
+            return stats
+
+        if cached is not None:
+            self._refresh_retry_at[league_code] = now + REFRESH_RETRY_BACKOFF
+            age_h = (now - cached.last_updated).total_seconds() / 3600 if cached.last_updated else None
+            logger.warning(
+                "League refresh failed; serving cached stats",
+                league=league_code,
+                cached_age_hours=round(age_h, 1) if age_h is not None else None,
+                lost_current_season=lost_current,
+                retry_in_minutes=int(REFRESH_RETRY_BACKOFF.total_seconds() // 60),
+            )
+            return cached
+
+        return None
 
     async def get_team_stats(
         self,

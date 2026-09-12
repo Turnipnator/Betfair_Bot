@@ -9,6 +9,7 @@ from the date, and a young season is blended with the one before it.
 Run in the betfair-bot container:
   docker compose exec -T -e PYTHONPATH=/app betfair-bot python tests/test_season_blend.py
 """
+import asyncio
 import pathlib
 from datetime import date
 
@@ -165,6 +166,63 @@ us_src = pathlib.Path("src/data/understat_data.py").read_text()
 check("no hard-coded 2526 path", "/2526/" in fd_src, False)
 check("no hard-coded new-format season", '"2024/2025"' in fd_src, False)
 check("no CURRENT_SEASON constant", "CURRENT_SEASON" in us_src, False)
+
+print("football-data.co.uk host and redirects (12 Sep 2026)")
+from datetime import datetime, timedelta
+from src.data.football_data import FOOTBALL_DATA_BASE, REFRESH_RETRY_BACKOFF, FootballDataService
+
+check("base URL is the bare domain (www now 302-redirects)", "www." in FOOTBALL_DATA_BASE, False)
+_svc = FootballDataService()
+check("client follows redirects", _svc._client.follow_redirects, True)
+
+print("a failed refresh serves the cached copy and backs off")
+
+
+def _stale(current=30.0, season=2026, hours_old=7):
+    return LeagueStats(league_code="E0", total_matches=50, season_start_year=season,
+                       current_season_matches=current,
+                       last_updated=datetime.utcnow() - timedelta(hours=hours_old))
+
+
+async def _run_refresh(cached, fresh_factory):
+    svc = FootballDataService()
+    if cached is not None:
+        svc._cache["E0"] = cached
+    calls = []
+
+    async def fetch(code, today=None):
+        calls.append(code)
+        return fresh_factory()
+    svc.fetch_league_data = fetch
+    first = await svc.get_league_stats("E0")
+    second = await svc.get_league_stats("E0")
+    await svc.close()
+    return first, second, len(calls)
+
+
+_old = _stale()
+first, second, n = asyncio.run(_run_refresh(_old, lambda: None))
+check("download failure: cached copy returned", first is _old, True)
+check("download failure: still cached on the next call", second is _old, True)
+check("download failure: no retry inside the backoff", n, 1)
+check("backoff is a quarter of an hour", REFRESH_RETRY_BACKOFF, timedelta(minutes=15))
+
+_old = _stale()
+first, second, n = asyncio.run(_run_refresh(_old, lambda: _stale(current=0.0, hours_old=0)))
+check("refresh that lost this season's file: cached blend kept", first is _old, True)
+check("refresh that lost this season's file: not retried inside the backoff", n, 1)
+
+_old = _stale(season=2025)
+_new = _stale(current=0.0, season=2026, hours_old=0)
+first, _, _ = asyncio.run(_run_refresh(_old, lambda: _new))
+check("July rollover: a new season with 0 games is accepted", first is _new, True)
+
+_fresh = _stale(current=40.0, hours_old=0)
+first, _, _ = asyncio.run(_run_refresh(_stale(), lambda: _fresh))
+check("good refresh replaces the cache", first is _fresh, True)
+
+first, _, _ = asyncio.run(_run_refresh(None, lambda: None))
+check("no cache and no download: None", first, None)
 
 print(f"\nRESULT: {PASS}/{PASS + FAIL} passed")
 raise SystemExit(1 if FAIL else 0)

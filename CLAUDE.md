@@ -292,6 +292,30 @@ once a round is played the team list is this season's, so relegated sides
 drop out. `match_results` are this season's only — a year-old result must
 never settle a bet. Understat follows the same rule. `tests/test_season_blend.py`.
 
+### The host moved and the names never matched (12 Sep 2026)
+
+football-data.co.uk now 302-redirects the `www` host to the bare domain. The
+httpx client did not follow redirects, so every league file failed and every
+domestic fixture became `no_stats`; the running process only survived on last
+season's copy in memory. `FOOTBALL_DATA_BASE` is the bare domain, the client
+follows redirects, and `get_league_stats` serves the cached copy with a
+15-minute backoff when a refresh fails or comes back without this season's
+games. Separately, 57 tier-1/2 fixtures in ten days were `no_stats` because
+Betfair's spelling had no alias (Nottm Forest, Sheff Utd, Paris St-G,
+Mgladbach, Hamburger SV, AC Monza, Sporting Lisbon, NEC Nijmegen ...).
+`_normalize_team_name` carries them and strips club-type affixes from both
+sides; `tests/test_team_aliases.py` locks every pair and checks that no two
+clubs in a league file collapse to one key. When adding a league, add its
+Betfair spellings there first.
+
+**LTD half-time cap is 3.2, not 2.8.** A 0-0 HT draw for the candidate profile
+trades at ~2.9–3.2 at the whistle. The 2.8 cap made the bot sit through the
+interval and enter at 50–56′ once the price drifted under it (30 of the first
+35 v2 entries were matched at 2.7–2.8), and it lost the candidates that scored
+just after the restart, which is the outcome a draw lay wants. The funnel
+`ht_entry` row now records `status` (HalfTime vs second half) so the split is
+measurable.
+
 ### The funnel is persisted
 
 Strategies call `record_evaluation(market, stage, outcome, reason, **detail)`

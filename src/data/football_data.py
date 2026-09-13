@@ -873,7 +873,15 @@ class FootballDataService:
             response.raise_for_status()
             return response.text
         except Exception as e:
-            logger.warning("Failed to download league file", url=url, error=str(e))
+            # httpx's timeout exceptions stringify to "", which left the
+            # 13 Sep 2026 E0 warning reading `error=` with no cause. Always
+            # name the type; keep the message when there is one.
+            logger.warning(
+                "Failed to download league file",
+                url=url,
+                error_type=type(e).__name__,
+                error=str(e) or type(e).__name__,
+            )
             return None
 
     async def _season_stats(

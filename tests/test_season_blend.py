@@ -224,5 +224,35 @@ check("good refresh replaces the cache", first is _fresh, True)
 first, _, _ = asyncio.run(_run_refresh(None, lambda: None))
 check("no cache and no download: None", first, None)
 
+print("a download failure names its cause (13 Sep 2026: httpx timeouts stringify to '')")
+from unittest.mock import AsyncMock, patch
+
+import httpx
+
+import src.data.football_data as fd_module
+
+
+async def _failed_download(exc):
+    svc = FootballDataService()
+    captured = {}
+
+    def warning(event, **kw):
+        captured[event] = kw
+    with patch.object(svc._client, "get", new=AsyncMock(side_effect=exc)), \
+            patch.object(fd_module.logger, "warning", new=warning):
+        result = await svc._download("https://football-data.co.uk/mmz4281/2627/E0.csv")
+    await svc.close()
+    return result, captured.get("Failed to download league file", {})
+
+
+result, kw = asyncio.run(_failed_download(httpx.ReadTimeout("")))
+check("timeout: returns None", result, None)
+check("timeout: error_type named", kw.get("error_type"), "ReadTimeout")
+check("timeout: error text is not empty", kw.get("error"), "ReadTimeout")
+result, kw = asyncio.run(_failed_download(httpx.HTTPStatusError(
+    "Server error '503 Service Unavailable'", request=None, response=None)))
+check("HTTP error: message kept", "503" in kw.get("error", ""), True)
+check("HTTP error: type named", kw.get("error_type"), "HTTPStatusError")
+
 print(f"\nRESULT: {PASS}/{PASS + FAIL} passed")
 raise SystemExit(1 if FAIL else 0)

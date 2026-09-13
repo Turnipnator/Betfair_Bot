@@ -14,10 +14,13 @@ Run a comprehensive health check on the betfair-bot. Work through each section s
 - Path: /opt/betfair-bot (NOT a git checkout — files are scp'd; see section 6 for drift detection)
 - Note: `sqlite3` is not installed inside the container. To query the DB, copy it out first:
   `docker cp betfair-bot:/app/data/betfair_bot.db /tmp/bf.db && sqlite3 /tmp/bf.db "<query>"`
-- `docker logs` only covers the *current* container. Every deploy is `compose down/up`, so
-  after a deploy the docker log is minutes old. The full history is on disk at
-  `/opt/betfair-bot/data/logs/bot.log` (rotates to `bot.log.1..5`, ~10MB each). Strip ANSI
-  with `sed -E 's/\x1b\[[0-9;]*m//g'` before grepping.
+- `docker logs` only covers the *current* container and is capped at 3×10MB by compose
+  (about six hours). Every deploy is `compose down/up`, so after a deploy the docker log is
+  minutes old. The full history is on disk at `/opt/betfair-bot/data/logs/bot.log` (rotates
+  to `bot.log.1..10`, ~10MB each, roughly a week at INFO since the 13 Sep 2026 volume cut).
+  `bot.log` itself can be minutes old, so grep **all** rotated files, oldest first:
+  `cat $(ls -r /opt/betfair-bot/data/logs/bot.log.* ) /opt/betfair-bot/data/logs/bot.log`.
+  Strip ANSI with `sed -E 's/\x1b\[[0-9;]*m//g'` before grepping.
 - Nags DB (read-only mount): `/root/horse-racing-bot/data/racing.db`. Query on the host with
   `sqlite3 'file:/root/horse-racing-bot/data/racing.db?mode=ro' "<query>"`.
 - `bets` columns: `bet_ref` (not `betfair_bet_id`), `status` (SETTLED/…), `result`
@@ -40,8 +43,10 @@ ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "docker ps --format '{{.Names}
 
 ```bash
 ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "docker compose -f /opt/betfair-bot/docker-compose.yml logs --tail 100 betfair-bot 2>&1"
-# Whole day, deduplicated, from disk
-ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "grep -h \"\$(date -u +%F)\" /opt/betfair-bot/data/logs/bot.log | sed -E 's/\x1b\[[0-9;]*m//g' | grep -iE 'warning|error|critical' | grep -v 'HR parse' | cut -c1-300 | awk '{\$1=\"\"; print}' | sort | uniq -c | sort -rn | head -40"
+# Whole day, deduplicated, from disk (all rotated files — bot.log alone may be minutes deep)
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "cd /opt/betfair-bot/data/logs && cat \$(ls -r bot.log.* 2>/dev/null) bot.log | grep -h \"\$(date -u +%F)\" | sed -E 's/\x1b\[[0-9;]*m//g' | grep -E '\[(warning|error|critical)' | grep -v 'HR parse' | cut -c1-300 | awk '{\$1=\"\"; print}' | sort | uniq -c | sort -rn | head -40"
+# How far back the on-disk history reaches (should be days, not hours)
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "cd /opt/betfair-bot/data/logs && sed -E 's/\x1b\[[0-9;]*m//g' \$(ls -r bot.log.* | head -1) | grep -m1 -oE '^20[0-9-]+T[0-9:]+'"
 ```
 
 ## 3. SIGNAL GENERATION
@@ -63,12 +68,17 @@ ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 'file:/root/horse-rac
 
 ## 4. PERFORMANCE METRICS
 - Recent P&L from the database (last 14 days), then strike rate vs break-even per strategy.
-  Break-even strike % = 100 / average matched odds (for BACK bets). A strategy whose strike
-  rate sits below its break-even is losing regardless of what the headline P&L says this week.
+  Break-even strike % depends on the side: **BACK = 100 / avg odds; LAY = 100 × (1 − 1 / avg odds)**.
+  A lay at 2.70 needs to win 63% of the time, not 37% — the 13 Sep 2026 check nearly credited
+  LTD with a 25-point edge it does not have. The query below picks the formula from `bet_type`.
+  A strategy whose strike rate sits below its break-even is losing regardless of what the
+  headline P&L says this week.
 
 ```bash
 ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 /tmp/bf.db 'SELECT strategy, status, result, COUNT(*), ROUND(SUM(profit_loss),2) FROM bets WHERE placed_at > datetime(\"now\",\"-14 days\") GROUP BY strategy, status, result;'"
-ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header /tmp/bf.db \"SELECT strategy, COUNT(*) n, ROUND(AVG(matched_odds),2) avg_odds, ROUND(100.0*SUM(result='WON')/COUNT(*),1) strike_pct, ROUND(100.0/AVG(matched_odds),1) breakeven_pct, ROUND(SUM(profit_loss),2) pnl, ROUND(100*SUM(profit_loss)/SUM(stake),1) roi_pct FROM bets WHERE status='SETTLED' AND result IN ('WON','LOST') AND placed_at > datetime('now','-30 days') GROUP BY strategy;\""
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header /tmp/bf.db \"SELECT strategy, bet_type, CASE WHEN bet_ref LIKE 'PAPER-%' THEN 'paper' ELSE 'live' END mode, COUNT(*) n, ROUND(AVG(matched_odds),2) avg_odds, ROUND(100.0*SUM(result='WON')/COUNT(*),1) strike_pct, ROUND(CASE WHEN bet_type='LAY' THEN 100.0*(1-1.0/AVG(matched_odds)) ELSE 100.0/AVG(matched_odds) END,1) breakeven_pct, ROUND(SUM(profit_loss),2) pnl, ROUND(100*SUM(profit_loss)/SUM(stake),1) roi_pct FROM bets WHERE status='SETTLED' AND result IN ('WON','LOST') AND placed_at > datetime('now','-30 days') GROUP BY 1,2,3;\""
+# Live money only, since the 27 Feb 2026 bankroll reset (compare with the Betfair balance in section 7e)
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header /tmp/bf.db \"SELECT strategy, COUNT(*) n, ROUND(SUM(COALESCE(profit_loss,0)),2) live_pnl FROM bets WHERE bet_ref NOT LIKE 'PAPER-%' AND placed_at > '2026-02-27' GROUP BY 1;\""
 ```
 
 ## 5. SYSTEM RESOURCES
@@ -135,7 +145,11 @@ ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sed -E 's/\x1b\[[0-9;]*m//g' 
 ```bash
 ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header /tmp/bf.db \"SELECT id, strategy, selection_name, status, placed_at FROM bets WHERE status!='SETTLED' AND placed_at < datetime('now','-1 day');\"; sqlite3 /tmp/bf.db \"SELECT strategy, COUNT(*) FROM bets WHERE result='VOID' AND placed_at > datetime('now','-14 days') GROUP BY 1;\""
 # LTD funnel is being written and scored (table exists from the 2 Sep 2026 build)
-ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 /tmp/bf.db \"SELECT stage, outcome, COUNT(*) n, SUM(ft_home IS NOT NULL) scored FROM strategy_evaluations WHERE start_time > datetime('now','-7 days') GROUP BY 1,2;\""
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 /tmp/bf.db \"SELECT stage, outcome, COUNT(*) n, SUM(ft_home IS NOT NULL) scored FROM strategy_evaluations WHERE strategy='lay_the_draw' AND start_time > datetime('now','-7 days') GROUP BY 1,2;\""
+# nags_place funnel (13 Sep 2026 build): one verdict per race Nags had a pick in. A Nags primary
+# pick with NO row here was never matched to a PLACE market (or the daily cap was hit) — that is
+# the case to chase. `not_ew_eligible` with the numbers is the rule working as designed.
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header /tmp/bf.db \"SELECT date(start_time) d, time(start_time) t, event_name, outcome, reason, detail FROM strategy_evaluations WHERE strategy='nags_place' AND start_time > datetime('now','-7 days') ORDER BY start_time;\""
 # Nags's own view of its recent picks (nags_place takes the first of nap > next_best > selection > race_nb per race)
 ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header 'file:/root/horse-racing-bot/data/racing.db?mode=ro' \"SELECT date(s.created_at) d, s.horse, s.selection_type, r.result, r.finish_position FROM selections s LEFT JOIN results r ON r.selection_id=s.id WHERE s.created_at > datetime('now','-14 days') AND s.superseded_at IS NULL ORDER BY s.created_at;\""
 ```
@@ -148,12 +162,23 @@ ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header 'file:/root/h
   follow RESEARCH.md — the health check reports, it does not retune.
 
 ## 10. SECURITY POSTURE (quick)
-Baseline from the 1 Sep 2026 review of `../IG/security_report.md` against this bot. Re-check
+Baseline from the 1 Sep 2026 review of `../IG/security_report.md` against this bot, corrected
+on 13 Sep 2026 when the check found the first two items had never actually been true. Re-check
 that none of these have regressed; anything new gets its own line in recommendations.
-- Cert/key file mode on the VPS (`ls -l /opt/betfair-bot/certs/`) — target 600, owner uid 1000.
-- `.env` and `certs/` are excluded by `.dockerignore` (otherwise `COPY . .` bakes them into the image).
+- Cert/key/.env file mode on the VPS — **600, owner uid 1000** for `certs/*` (the container runs
+  as uid 1000 and mounts them read-only), 600 root for `.env`. Fixed 13 Sep 2026. **Any `scp` of
+  the certs from the Mac resets them to 644 uid 501**, so re-run the chown/chmod after one.
+- `.env` and `certs/` are excluded by `.dockerignore` (added 13 Sep 2026 — before that every
+  image, including the `rollback-*` tag, carried the live credentials and private key). Runtime
+  gets both from `env_file` and the certs volume, so nothing needs them in the image.
 - `docker-compose.yml` still uses `network_mode: host` (shares localhost with ib-gateway etc.).
 - `config/logging_config.py` on the VPS still carries `RedactSecretsFilter` (Telegram token redaction).
+
+```bash
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "ls -ln /opt/betfair-bot/certs/ /opt/betfair-bot/.env; grep -nE '^(\.env|certs/)$' /opt/betfair-bot/.dockerignore; grep -n network_mode /opt/betfair-bot/docker-compose.yml; grep -c RedactSecretsFilter /opt/betfair-bot/config/logging_config.py"
+# The built image must NOT contain either (expect two 'No such file' lines)
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "docker run --rm --network none --entrypoint sh betfair-bot-betfair-bot:latest -c 'ls /app/.env /app/certs/client-2048.key' 2>&1"
+```
 
 ## 11. RUNNING THE TESTS
 Every file in `tests/` is currently a script that `raise SystemExit`s at import (pytest collects nothing
@@ -183,7 +208,9 @@ Present a quick status summary table:
 | Resources OK | ?/?/? | |
 | Session Valid | ?/? | login/keep-alive, cert expiry |
 | Deployed = Repo | ?/? | md5 drift list |
-| Data Integrity | ?/? | stranded bets, VOID run |
-| Strategy Edge | ?/?/? | strike vs break-even |
+| Data Integrity | ?/? | stranded bets, VOID run, nags_place funnel rows |
+| Strategy Edge | ?/?/? | strike vs break-even (side-aware) |
+| Security | ?/? | file modes, image free of secrets, redaction filter |
+| Tests | ?/? | script assertions passed in a throwaway container |
 
 Traffic light summary: 🟢 All good / 🟡 Minor issues / 🔴 Needs attention

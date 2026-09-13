@@ -5,6 +5,7 @@ Provides clean interfaces for interacting with database tables.
 """
 
 import json
+from collections.abc import Iterable
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -442,19 +443,32 @@ class EvaluationRepository:
         )
 
     async def get_pending_scores(
-        self, now: datetime, limit: int = 50
+        self,
+        now: datetime,
+        limit: int = 50,
+        exclude_strategies: Iterable[str] = (),
     ) -> list[StrategyEvaluationRecord]:
-        """Rows whose match is in the HT window or past FT and still missing that score."""
+        """Rows whose match is in the HT window or past FT and still missing that score.
+
+        ``exclude_strategies`` keeps non-football funnels (the Nags place leg)
+        out of the score poll: a horse race has an event_id but no half-time.
+        """
         now = _naive_utc(now) or now
         ht_from = now - timedelta(minutes=self.HT_WINDOW_MINUTES[1])
         ht_to = now - timedelta(minutes=self.HT_WINDOW_MINUTES[0])
         ft_before = now - timedelta(minutes=self.FT_AFTER_MINUTES)
         oldest = now - timedelta(hours=self.MAX_AGE_HOURS)
+        excluded = tuple(exclude_strategies)
 
-        result = await self.session.execute(
+        query = (
             select(StrategyEvaluationRecord)
             .where(StrategyEvaluationRecord.event_id.is_not(None))
             .where(StrategyEvaluationRecord.start_time >= oldest)
+        )
+        if excluded:
+            query = query.where(StrategyEvaluationRecord.strategy.notin_(excluded))
+        result = await self.session.execute(
+            query
             .where(
                 or_(
                     StrategyEvaluationRecord.ht_home.is_(None)

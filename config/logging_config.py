@@ -88,12 +88,15 @@ def setup_logging(
     )
 
     # Add rotating file handler if specified
-    # Keeps 5 files of max 10MB each (50MB total max)
+    # Keeps 10 files of max 10MB each (100MB total). At INFO the bot writes
+    # ~17MB/day, so this holds roughly a week; five backups held under a day
+    # (13 Sep 2026), which made the healthcheck's "whole day" review and any
+    # multi-day forensics impossible after a busy afternoon.
     if log_file:
         file_handler = RotatingFileHandler(
             log_file,
             maxBytes=10 * 1024 * 1024,  # 10MB per file
-            backupCount=5,  # Keep 5 backup files
+            backupCount=10,  # Keep 10 backup files
         )
         file_handler.setLevel(getattr(logging, log_level.upper()))
         file_handler.addFilter(RedactSecretsFilter())

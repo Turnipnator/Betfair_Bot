@@ -726,27 +726,55 @@ class NagsPlaceStrategy(_NagsStrategyBase):
     ``nags_back`` on the WIN market and ``nags_place`` on the PLACE market, on
     the same horse, at the same flat stake.
 
-    Fires only when the pick's WIN odds are ``EACH_WAY_MIN_WIN_ODDS`` (5/1) or
-    longer, matching the CLAUDE.md rule. Note the *win* price is taken from the
-    Nags ``odds_guide``, not from this market: a PLACE market prices the place,
-    so it cannot tell us whether the horse is a 5/1-plus shot.
+    Fires on the CLAUDE.md each-way rule (``_ew_place_eligible``): handicaps
+    always; non-handicaps only at 8+ runners AND a win price of 3/1 or longer.
+    The *win* price is taken from the Nags ``odds_guide``, not from this
+    market: a PLACE market prices the place, so it cannot tell us whether the
+    horse is a 3/1-plus shot.
 
-    Paper-only (see FORCE_PAPER_STRATEGIES) so the EW variant builds its own
-    record alongside the live win-only leg before it ever risks money. It also
-    draws on its own daily cap, so it cannot starve live ``nags_back``.
+    LIVE at ``PLACE_FLAT_STAKE`` since 27 Jul 2026 (see FORCE_PAPER_STRATEGIES).
+    It draws on its own daily cap, so it can never starve the win leg.
+
+    Every verdict on a race Nags has a pick in is written to the funnel
+    (``record_evaluation``, stage ``preoff``) so "why was there no place leg on
+    the NAP" is a query, not a log grep. Until 13 Sep 2026 the skip reasons
+    were DEBUG-only and the log rotated in under a day, so two Group-2 picks
+    that finished placed could not be audited after the fact. Races with no
+    pick and markets blocked before the pick is known (daily cap, inside
+    ``MIN_SECONDS_TO_OFF``) write nothing: the last verdict stands.
     """
 
     name: str = "nags_place"
     supported_market_types: frozenset[str] = frozenset({"PLACE"})
 
+    # Funnel vocabulary. Stage is "preoff" (one decision per race, revised
+    # every scan until the off); outcome is "rejected" or "entered".
+    FUNNEL_STAGE = "preoff"
+    REASON_FEW_RUNNERS = "few_runners"          # < PLACE_MIN_RUNNERS active
+    REASON_NO_PLACES_COUNT = "no_places_count"  # MarketBook gave no number_of_winners
+    REASON_PICK_NOT_PRICED = "pick_not_priced"  # every pick is a non-runner / unpriced
+    REASON_NOT_EW_ELIGIBLE = "not_ew_eligible"  # the CLAUDE.md EW rule said win-only
+    REASON_EW_LEG = "ew_leg"                    # signal issued
+
     async def evaluate(self, market: Market) -> Optional[BetSignal]:
         if not self.pre_evaluate(market):
+            return None
+
+        # Picks first: only races Nags has an opinion on go into the funnel.
+        # Every other PLACE market on the card is noise nobody will query.
+        picks = _picks_for_market(market, _index_picks_by_race(self._todays_picks()))
+        if not picks:
             return None
 
         # No bookmaker place pool below 5 runners; Betfair mirrors this by not
         # framing the market, but guard anyway in case one is listed early.
         active = [r for r in market.runners if r.status == "ACTIVE"]
-        if len(active) < PLACE_MIN_RUNNERS:
+        num_active = len(active)
+        if num_active < PLACE_MIN_RUNNERS:
+            await self.record_evaluation(
+                market, self.FUNNEL_STAGE, "rejected", self.REASON_FEW_RUNNERS,
+                num_active=num_active,
+            )
             return None
 
         # Places paid. Without it the bet cannot be settled later, so skip
@@ -756,10 +784,10 @@ class NagsPlaceStrategy(_NagsStrategyBase):
                 "Place market has no number_of_winners, skipping",
                 market=market.market_id,
             )
-            return None
-
-        picks = _picks_for_market(market, _index_picks_by_race(self._todays_picks()))
-        if not picks:
+            await self.record_evaluation(
+                market, self.FUNNEL_STAGE, "rejected", self.REASON_NO_PLACES_COUNT,
+                num_active=num_active,
+            )
             return None
 
         priority = {
@@ -783,6 +811,11 @@ class NagsPlaceStrategy(_NagsStrategyBase):
             break
 
         if pick is None:
+            await self.record_evaluation(
+                market, self.FUNNEL_STAGE, "rejected", self.REASON_PICK_NOT_PRICED,
+                horses=[p.horse for p in picks_sorted],
+                num_active=num_active,
+            )
             return None
 
         # From here every failure is TERMINAL — never fall through to a
@@ -793,22 +826,32 @@ class NagsPlaceStrategy(_NagsStrategyBase):
         # CLAUDE.md each-way rule (see _ew_place_eligible). `active`
         # (>= PLACE_MIN_RUNNERS, guarded above) is the field on this market.
         is_handicap = "handicap" in (pick.race_name or "").lower()
-        num_active = len(active)
         win_odds = _parse_odds_guide(pick.odds_guide)
+        verdict = {
+            "horse": pick.horse,
+            "selection_type": pick.selection_type,
+            "odds_guide": pick.odds_guide,
+            "win_odds": win_odds,
+            "num_active": num_active,
+            "is_handicap": is_handicap,
+            "places": market.number_of_winners,
+        }
         if not _ew_place_eligible(is_handicap, num_active, win_odds):
             # Non-handicap with <8 runners or shorter than 3/1 (or a
             # non-handicap with no parseable win price) -> win-only, no leg.
-            logger.debug(
-                "Nags pick not EW-eligible, no place leg",
-                horse=pick.horse,
-                win_odds=win_odds,
-                num_active=num_active,
-                is_handicap=is_handicap,
+            logger.debug("Nags pick not EW-eligible, no place leg", **verdict)
+            await self.record_evaluation(
+                market, self.FUNNEL_STAGE, "rejected", self.REASON_NOT_EW_ELIGIBLE,
+                **verdict,
             )
             return None
 
         place_odds = runner.best_back_price
         _tracker.record_bet(self.name, market.market_id)
+        await self.record_evaluation(
+            market, self.FUNNEL_STAGE, "entered", self.REASON_EW_LEG,
+            place_odds=place_odds, **verdict,
+        )
         return BetSignal(
             market_id=market.market_id,
             selection_id=runner.selection_id,

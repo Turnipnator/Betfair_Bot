@@ -334,7 +334,13 @@ verdict and the numbers behind it. `enrich_evaluations` (every 2 min) fills
 `ht_*`/`ft_*` scores from the in-play feed (HT only while the feed says
 HalfTime) with football-data.co.uk as the FT fallback. So "would loosening the
 favourite filter have paid" is a query, not a two-day log window. LTD is
-instrumented; new strategies should be. `tests/test_ltd_funnel.py`.
+instrumented (`tests/test_ltd_funnel.py`), and so is `nags_place` since 13 Sep
+2026: stage `preoff`, reasons `few_runners`, `no_places_count`,
+`pick_not_priced`, `not_ew_eligible`, `ew_leg`, each with the field size, win
+price and handicap flag it rested on. Only races Nags has a pick in get a row,
+so a primary pick with no row was never matched to a PLACE market. Horse-racing
+rows are excluded from the HT/FT score poll (`tests/test_nags_place_funnel.py`).
+New strategies should be instrumented the same way.
 
 ### CLV is pre-off only
 

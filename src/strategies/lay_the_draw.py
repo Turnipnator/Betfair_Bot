@@ -174,7 +174,10 @@ class LayTheDrawStrategy(BaseStrategy):
         Returns:
             Always None (candidates are stored internally)
         """
-        logger.info(
+        # DEBUG: fires for every fixture on every 60s scan and, with the
+        # engine's "passed supports_market" twin, was 47% of the log volume.
+        # The funnel (record_evaluation) is the durable record of the verdict.
+        logger.debug(
             "LTD: Evaluating market",
             market=market.event_name,
             market_type=market.market_type,

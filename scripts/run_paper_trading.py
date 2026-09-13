@@ -761,7 +761,9 @@ class PaperTradingEngine:
 
                     supports = strategy.supports_market(market)
                     if strategy.name == "lay_the_draw" and supports:
-                        logger.info(
+                        # DEBUG: once per fixture per scan; see the twin in
+                        # LayTheDrawStrategy.evaluate for why.
+                        logger.debug(
                             "LTD passed supports_market",
                             market=market.event_name,
                             sport=market.sport,
@@ -816,7 +818,13 @@ class PaperTradingEngine:
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         try:
             async with db.session() as session:
-                pending = await EvaluationRepository(session).get_pending_scores(now)
+                # HT/FT scores are a football concept. The Nags place leg
+                # writes funnel rows too (stage "preoff"), and each carries a
+                # Betfair event_id, so without this filter every horse race
+                # would be polled for a half-time score it can never have.
+                pending = await EvaluationRepository(session).get_pending_scores(
+                    now, exclude_strategies=HORSE_RACING_STRATEGIES
+                )
             if not pending:
                 return
 

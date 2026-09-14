@@ -20,7 +20,7 @@ from src.models import Bet, BetSignal, BetType, Market, Runner, Sport
 from src.strategies.base import BaseStrategy
 from src.utils import calculate_freebet_hedge_stake, round_to_tick
 from src.data.football_data import LEAGUE_TIERS, football_data_service
-from src.betfair.client import betfair_client
+from src.betfair.client import MatchState, betfair_client
 
 logger = get_logger(__name__)
 
@@ -56,6 +56,13 @@ MAX_HT_DRAW_ODDS = 3.2
 # Minimum market liquidity (total matched on market) to ensure fair exit prices
 MIN_MARKET_LIQUIDITY = 15_000  # £15k
 
+# Fewer blended home (away) games than this and the team's averages are an
+# unknown quantity, not a verdict on its scoring. Recorded in the funnel as
+# `insufficient_games` since 14 Sep 2026; before that the averages were zeroed
+# and the fixture fell through to `home_goals`, which hid every promoted or
+# relegated side (no prior season in its new division) until late September.
+MIN_TEAM_HOME_AWAY_GAMES = 3
+
 
 class LTDState(str, Enum):
     """Lay the Draw position states."""
@@ -81,6 +88,10 @@ class LTDCandidate:
     home_goals_avg: float = 0.0
     away_goals_avg: float = 0.0
     favourite_odds: float = 0.0
+    # First non-0-0 reading seen before the whistle ("1-0 at 20'"), kept so a
+    # half-time entry after it shows in the funnel that the reading did not
+    # stand (disallowed goal or feed glitch).
+    pre_ht_goal_reading: Optional[str] = None
     identified_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -246,9 +257,29 @@ class LayTheDrawStrategy(BaseStrategy):
                             )
                             return None
 
-                        home_goals_avg = home_stats.home_scored_avg if home_stats.home_played >= 3 else 0
-                        away_goals_avg = away_stats.away_scored_avg if away_stats.away_played >= 3 else 0
-                        home_conceded_avg = home_stats.home_conceded_avg if home_stats.home_played >= 3 else 99
+                        if (
+                            home_stats.home_played < MIN_TEAM_HOME_AWAY_GAMES
+                            or away_stats.away_played < MIN_TEAM_HOME_AWAY_GAMES
+                        ):
+                            logger.debug(
+                                "LTD: Skipping - too few games for reliable averages",
+                                market=market.event_name,
+                                home_played=round(home_stats.home_played, 1),
+                                away_played=round(away_stats.away_played, 1),
+                                min_required=MIN_TEAM_HOME_AWAY_GAMES,
+                            )
+                            await self.record_evaluation(
+                                market, "prematch", "rejected", "insufficient_games",
+                                league=league_stats.league_code,
+                                home_played=round(home_stats.home_played, 1),
+                                away_played=round(away_stats.away_played, 1),
+                                prior_weight=round(home_stats.prior_weight, 2),
+                            )
+                            return None
+
+                        home_goals_avg = home_stats.home_scored_avg
+                        away_goals_avg = away_stats.away_scored_avg
+                        home_conceded_avg = home_stats.home_conceded_avg
 
                         # Priority 2: Tighter goals filters
                         # Home team must be prolific scorers at home
@@ -438,18 +469,38 @@ class LayTheDrawStrategy(BaseStrategy):
             return None
 
         # Must be 0-0
+        score = f"{match_state.home_score}-{match_state.away_score}"
         if match_state.home_score != 0 or match_state.away_score != 0:
-            # Goal scored — no longer a candidate
+            # A first-half reading is not final. Roma v Atalanta (5 Sep 2026)
+            # read 1-0 at 20' and Napoli v Bologna (13 Sep) 0-1 at 6'; both
+            # were 0-0 at the whistle, both finished non-draw, and both had
+            # been deleted here on that first reading. A disallowed goal or a
+            # feed glitch must not kill the candidate: hold it and let the
+            # half-time (or second-half) score decide.
+            if not self._score_is_final_for_ht(match_state):
+                if candidate.pre_ht_goal_reading is None:
+                    candidate.pre_ht_goal_reading = f"{score} at {match_state.match_time}'"
+                    logger.info(
+                        "LTD: Goal reading before HT - holding candidate until the whistle",
+                        market=candidate.event_name,
+                        score=score,
+                        match_time=match_state.match_time,
+                    )
+                return None
+
             logger.info(
-                "LTD: Candidate removed - goal scored before HT entry",
+                "LTD: Candidate removed - not 0-0 at half-time",
                 market=candidate.event_name,
-                score=f"{match_state.home_score}-{match_state.away_score}",
+                score=score,
+                status=match_state.status,
+                match_time=match_state.match_time,
             )
             del self._candidates[market.market_id]
             await self.record_evaluation(
                 market, "halftime", "dropped", "goal_before_ht",
-                score=f"{match_state.home_score}-{match_state.away_score}",
+                score=score,
                 match_time=match_state.match_time,
+                status=match_state.status,
             )
             return None
 
@@ -521,10 +572,27 @@ class LayTheDrawStrategy(BaseStrategy):
             status=match_state.status,
             total_matched=round(market.total_matched),
             favourite_odds=candidate.favourite_odds,
+            pre_ht_goal_reading=candidate.pre_ht_goal_reading,
         )
 
         self.log_signal(signal)
         return signal
+
+    @staticmethod
+    def _score_is_final_for_ht(match_state: MatchState) -> bool:
+        """
+        Whether a non-0-0 reading can be trusted to drop a candidate.
+
+        True once the feed says half-time (or the second half has kicked
+        off), the clock is past 45 minutes, or the match has finished. A
+        reading taken in the first half, stoppage time included, is held
+        instead: the score at the whistle is the only one that matters.
+        """
+        return (
+            match_state.is_half_time
+            or match_state.is_finished
+            or match_state.match_time > 45
+        )
 
     def get_candidates(self) -> dict[str, LTDCandidate]:
         """Get current candidates waiting for HT entry."""

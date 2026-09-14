@@ -169,6 +169,10 @@ class MarketFilter:
     sports: list[Sport] = field(default_factory=lambda: [Sport.HORSE_RACING, Sport.FOOTBALL])
     market_types: list[str] = field(default_factory=lambda: ["WIN", "MATCH_ODDS"])
     countries: list[str] = field(default_factory=lambda: ["GB", "IE"])
+    # Betfair competition ids. Empty = any competition. Used for the UEFA
+    # fetch, which has no country to filter on (a tie is in whichever country
+    # hosts it) and must not be a capped worldwide fetch.
+    competition_ids: list[str] = field(default_factory=list)
     in_play_only: bool = False
     max_results: int = 100
     min_total_matched: float = 0.0

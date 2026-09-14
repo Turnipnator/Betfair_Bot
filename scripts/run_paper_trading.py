@@ -28,6 +28,7 @@ from apscheduler.triggers.cron import CronTrigger
 from config import settings
 from config.logging_config import setup_logging, get_logger
 from src.betfair import betfair_client
+from src.betfair.client import UEFA_COMPETITION_IDS
 from src.database import (
     db,
     BankrollRepository,
@@ -698,14 +699,21 @@ class PaperTradingEngine:
                 max_results=200,
             )
 
-            # Second filter for UEFA competitions (no country filter, will filter by competition name)
+            # Second filter for the three UEFA club competitions, by Betfair
+            # competition id. Until 14 Sep 2026 this was a worldwide fetch (no
+            # country filter) capped at 50 results and post-filtered by name:
+            # Betfair returned exactly 50 on every scan, so whether a European
+            # tie was seen depended on where Betfair ranked it against the rest
+            # of the world's football that day. The name filter below stays as
+            # a guard on the ids.
             uefa_filter = MarketFilter(
                 sports=[Sport.FOOTBALL],
                 market_types=["MATCH_ODDS"],
-                countries=[],  # No country filter for UEFA
+                countries=[],  # a tie is in whichever country hosts it
+                competition_ids=list(UEFA_COMPETITION_IDS),
                 from_hours=0.5,
                 to_hours=12,
-                max_results=50,
+                max_results=200,
             )
 
             # Fetch markets from both sources
@@ -829,6 +837,9 @@ class PaperTradingEngine:
                 return
 
             updates: list[tuple[int, Optional[tuple[int, int]], Optional[tuple[int, int]]]] = []
+            # LTD and value betting each keep a row for the same fixture; one
+            # feed call per event per run serves both.
+            states: dict = {}
             for row in pending:
                 minutes_since_ko = (now - row.start_time).total_seconds() / 60
                 in_ht_window = row.ht_home is None and minutes_since_ko <= EvaluationRepository.HT_WINDOW_MINUTES[1]
@@ -839,11 +850,15 @@ class PaperTradingEngine:
                         continue
 
                 ht = ft = None
-                try:
-                    state = await betfair_client.get_match_state(row.event_id)
-                except Exception as e:
-                    logger.debug("Match state unavailable for funnel row", event_id=row.event_id, error=str(e))
-                    state = None
+                if row.event_id in states:
+                    state = states[row.event_id]
+                else:
+                    try:
+                        state = await betfair_client.get_match_state(row.event_id)
+                    except Exception as e:
+                        logger.debug("Match state unavailable for funnel row", event_id=row.event_id, error=str(e))
+                        state = None
+                    states[row.event_id] = state
 
                 if state:
                     if row.ht_home is None and state.is_half_time:

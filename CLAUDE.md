@@ -342,6 +342,51 @@ so a primary pick with no row was never matched to a PLACE market. Horse-racing
 rows are excluded from the HT/FT score poll (`tests/test_nags_place_funnel.py`).
 New strategies should be instrumented the same way.
 
+### A goal reading before the whistle is not a goal (14 Sep 2026)
+
+`evaluate_halftime` used to delete an LTD candidate on the first non-0-0
+reading from the in-play feed, at any minute. Roma v Atalanta (5 Sep) read
+1-0 at 20' and Napoli v Bologna (13 Sep) 0-1 at 6'; both were 0-0 at the
+whistle (football-data.co.uk agrees), both finished non-draw, and both
+entries were lost. A disallowed goal or a feed glitch must not kill a
+candidate: a first-half reading (stoppage time included) is now **held** and
+noted on the candidate, and the drop happens only when the score is final
+for the entry point (`HalfTime` status, the clock past 45, or `Finished`).
+The `ht_entry` row records `pre_ht_goal_reading` so a phantom shows in the
+funnel. In the fortnight to 14 Sep, 9 candidates were 0-0 at HT, 4 were
+entered, and all 5 of the missed ones finished non-draw — 3 to the
+second-half wait fixed on 12 Sep, 2 to this. `tests/test_ltd_funnel.py`.
+
+Same day: fewer than three blended home (away) games is now recorded as
+`insufficient_games`, not zeroed into `home_goals`. A promoted or relegated
+side has no prior season in its new division, so until late September it is
+an unknown quantity, and the funnel now says so (7 of the 45 weekend
+`home_goals` rejections on 12–13 Sep were 0.0 averages of this kind).
+
+### UEFA markets are fetched by competition id (14 Sep 2026)
+
+A European tie is in whichever country hosts it, so the second football fetch
+had no country filter, `max_results=50`, and a name check afterwards. Betfair
+returned exactly 50 on every scan, so whether a tie was seen depended on
+where Betfair ranked it against the rest of the world's football that day.
+The fetch now passes `UEFA_COMPETITION_IDS` (`src/betfair/client.py`: 228
+Champions League, 2005 Europa League, 12375833 Conference League, verified
+against `listCompetitions`) through `MarketFilter.competition_ids`, and
+`get_markets` **warns** whenever any catalogue call comes back full.
+`tests/test_uefa_fetch.py`.
+
+### Value betting is in the funnel too (14 Sep 2026)
+
+`value_betting` writes one `prematch` row per fixture: `no_stats`,
+`league_tier`, `insufficient_games`, `home_form`, `away_form`, `no_away_win`,
+then, once the Poisson has run, `odds_range` (nothing priced inside
+1.50–2.00), `low_volume`, `edge` (a side was in the window but short of the
+required edge) or the `signal`/`value_found` row. Every scored row carries
+`home_odds`/`away_odds`, `home_edge`/`away_edge`, `home_prob`/`away_prob`,
+`best_edge`, `required_edge`, `using_xg` and the league, and is HT/FT-scored
+like LTD, so the threshold can be tested as a query. The three per-fixture
+per-scan log lines went to DEBUG. `tests/test_vb_funnel.py`.
+
 ### CLV is pre-off only
 
 `record_closing_lines` snapshots open bets only while

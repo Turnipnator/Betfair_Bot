@@ -79,6 +79,12 @@ class ValueBettingStrategy(BaseStrategy):
         # For now, we'll store them when evaluate is called
         self._model_probabilities: dict[int, float] = {}
 
+        # Funnel context for the fixture being evaluated: the Poisson inputs
+        # and outputs (league, probabilities, xG flag) and which runner is the
+        # home side, so the verdict row can carry the numbers it rested on.
+        self._eval_context: dict = {}
+        self._runner_roles: dict[int, str] = {}
+
     def set_model_probabilities(self, probs: dict[int, float]) -> None:
         """
         Set model probabilities for selections.
@@ -168,14 +174,18 @@ class ValueBettingStrategy(BaseStrategy):
                     best_edge = signal.edge
                     best_signal = signal
 
-        # Log evaluation summary
-        logger.info(
+        # DEBUG: fires for every fixture on every 60s scan. The funnel row
+        # written below is the durable record of the verdict.
+        logger.debug(
             "Market evaluation complete",
             market=market.market_name[:25],
             runners=runners_evaluated,
             passed_filters=runners_passed_filters,
             found_value=best_signal is not None,
         )
+
+        if self._eval_context:
+            await self._record_verdict(market, best_signal)
 
         if best_signal:
             logger.info(
@@ -188,6 +198,66 @@ class ValueBettingStrategy(BaseStrategy):
             self.log_signal(best_signal)
 
         return best_signal
+
+    async def _record_verdict(self, market: Market, best_signal: Optional[BetSignal]) -> None:
+        """
+        Persist the fixture's verdict with the numbers behind it.
+
+        One row per fixture (stage ``prematch``): the model and market odds
+        for each side, the best edge inside the odds window and the edge the
+        window required. The reason names the binding filter, so "would a
+        15% edge have paid" or "what sits just outside 1.50-2.00" is a query
+        over ``strategy_evaluations`` rather than a two-day log window.
+        """
+        detail: dict = dict(self._eval_context)
+        best_edge: Optional[float] = None
+        required_edge: Optional[float] = None
+        any_priced = any_in_range = any_in_range_with_volume = False
+
+        for runner in market.runners:
+            model_prob = self._model_probabilities.get(runner.selection_id)
+            if model_prob is None or runner.status != "ACTIVE":
+                continue
+            role = self._runner_roles.get(runner.selection_id, f"sel{runner.selection_id}")
+            odds = runner.best_back_price
+            if not odds:
+                continue
+            any_priced = True
+            edge = model_prob - decimal_to_implied_prob(odds)
+            detail[f"{role}_odds"] = odds
+            detail[f"{role}_edge"] = round(edge, 4)
+            if self.min_odds <= odds <= self.max_odds:
+                any_in_range = True
+                effective_volume = runner.total_matched or market.total_matched / len(market.runners)
+                if effective_volume >= self.min_volume:
+                    any_in_range_with_volume = True
+                    required = (
+                        self.high_odds_min_edge
+                        if odds >= self.high_odds_threshold
+                        else self.min_edge
+                    )
+                    if best_edge is None or edge > best_edge:
+                        best_edge, required_edge = edge, required
+
+        if best_edge is not None:
+            detail["best_edge"] = round(best_edge, 4)
+            detail["required_edge"] = required_edge
+        detail["odds_range"] = f"{self.min_odds}-{self.max_odds}"
+
+        if best_signal is not None:
+            await self.record_evaluation(
+                market, "prematch", "signal", "value_found",
+                selection=best_signal.selection_name, odds=best_signal.odds,
+                edge=round(best_signal.edge or 0.0, 4), **detail,
+            )
+        elif any_in_range_with_volume:
+            await self.record_evaluation(market, "prematch", "rejected", "edge", **detail)
+        elif any_in_range:
+            await self.record_evaluation(market, "prematch", "rejected", "low_volume", **detail)
+        elif any_priced:
+            await self.record_evaluation(market, "prematch", "rejected", "odds_range", **detail)
+        else:
+            await self.record_evaluation(market, "prematch", "rejected", "no_price", **detail)
 
     async def _generate_model_probabilities(self, market: Market) -> None:
         """
@@ -327,6 +397,11 @@ class ValueBettingStrategy(BaseStrategy):
         # Get the football data service
         data_service = await get_football_data_service()
 
+        # A fresh fixture: nothing from the previous market may leak into
+        # this one's funnel row.
+        self._eval_context = {}
+        self._runner_roles = {}
+
         # Parse team names from market
         home_team, away_team = self._parse_team_names(market)
         if not home_team or not away_team:
@@ -334,17 +409,20 @@ class ValueBettingStrategy(BaseStrategy):
                 "Could not parse team names",
                 market=market.market_name,
             )
+            await self.record_evaluation(market, "prematch", "rejected", "parse_failed")
             return
 
         # Get team statistics from football-data.co.uk (required for filters)
         match_stats = await data_service.get_match_stats(home_team, away_team)
         if not match_stats:
-            logger.info(
+            # DEBUG: ~20 fixtures per 60s scan. The funnel carries the verdict.
+            logger.debug(
                 "No statistics found for teams",
                 home=home_team,
                 away=away_team,
                 market=market.market_name,
             )
+            await self.record_evaluation(market, "prematch", "rejected", "no_stats")
             return
 
         home_stats, away_stats, league_stats = match_stats
@@ -358,6 +436,10 @@ class ValueBettingStrategy(BaseStrategy):
                 tier=league_tier,
                 max_tier=self.MAX_LEAGUE_TIER,
             )
+            await self.record_evaluation(
+                market, "prematch", "rejected", "league_tier",
+                league=league_stats.league_code, tier=league_tier,
+            )
             return
 
         # Filter: Big 5 leagues only (where xG data is available)
@@ -367,6 +449,10 @@ class ValueBettingStrategy(BaseStrategy):
                 league=league_stats.league_code,
                 big_5=list(self.BIG_5_LEAGUES),
             )
+            await self.record_evaluation(
+                market, "prematch", "rejected", "not_big_5",
+                league=league_stats.league_code, tier=league_tier,
+            )
             return
 
         # Filter: Teams must have minimum games for reliable statistics
@@ -375,6 +461,13 @@ class ValueBettingStrategy(BaseStrategy):
                 "Skipping - insufficient team data",
                 home_games=home_stats.matches_played,
                 away_games=away_stats.matches_played,
+                min_required=self.MIN_TEAM_GAMES,
+            )
+            await self.record_evaluation(
+                market, "prematch", "rejected", "insufficient_games",
+                league=league_stats.league_code,
+                home_games=round(home_stats.matches_played, 1),
+                away_games=round(away_stats.matches_played, 1),
                 min_required=self.MIN_TEAM_GAMES,
             )
             return
@@ -387,6 +480,13 @@ class ValueBettingStrategy(BaseStrategy):
                 home_win_rate=f"{home_stats.home_win_rate:.1%}",
                 min_required=f"{self.MIN_HOME_WIN_RATE:.1%}",
             )
+            await self.record_evaluation(
+                market, "prematch", "rejected", "home_form",
+                league=league_stats.league_code,
+                home_win_rate=round(home_stats.home_win_rate, 3),
+                home_played=round(home_stats.home_played, 1),
+                min_required=self.MIN_HOME_WIN_RATE,
+            )
             return
 
         # Filter: Away team form check
@@ -397,6 +497,13 @@ class ValueBettingStrategy(BaseStrategy):
                 away_win_rate=f"{away_stats.away_win_rate:.1%}",
                 min_required=f"{self.MIN_AWAY_WIN_RATE:.1%}",
             )
+            await self.record_evaluation(
+                market, "prematch", "rejected", "away_form",
+                league=league_stats.league_code,
+                away_win_rate=round(away_stats.away_win_rate, 3),
+                away_played=round(away_stats.away_played, 1),
+                min_required=self.MIN_AWAY_WIN_RATE,
+            )
             return
 
         # Filter: Away team must have won at least one away game
@@ -405,6 +512,11 @@ class ValueBettingStrategy(BaseStrategy):
                 "Skipping - away team has no away wins",
                 away=away_team,
                 away_wins=away_stats.away_wins,
+            )
+            await self.record_evaluation(
+                market, "prematch", "rejected", "no_away_win",
+                league=league_stats.league_code,
+                away_played=round(away_stats.away_played, 1),
             )
             return
 
@@ -461,7 +573,9 @@ class ValueBettingStrategy(BaseStrategy):
             away_conceded_avg=away_conceded_avg,
         )
 
-        logger.info(
+        # DEBUG: fires for every covered fixture on every 60s scan (13.7k
+        # lines on 13 Sep 2026). The funnel row carries the same numbers.
+        logger.debug(
             "Poisson prediction calculated",
             home=home_team,
             away=away_team,
@@ -477,6 +591,18 @@ class ValueBettingStrategy(BaseStrategy):
             using_xg=using_xg,
         )
 
+        self._eval_context = {
+            "league": league_stats.league_code,
+            "tier": league_tier,
+            "using_xg": using_xg,
+            "home_prob": round(prediction.home_win_prob, 4),
+            "draw_prob": round(prediction.draw_prob, 4),
+            "away_prob": round(prediction.away_win_prob, 4),
+            "home_form": round(home_stats.home_win_rate, 3),
+            "away_form": round(away_stats.away_win_rate, 3),
+            "prior_weight": round(max(home_stats.prior_weight, away_stats.prior_weight), 2),
+        }
+
         # Map predictions to runner selection IDs
         # EXCLUDE DRAWS - we have lay_the_draw strategy for that
         self._model_probabilities = {}
@@ -484,13 +610,16 @@ class ValueBettingStrategy(BaseStrategy):
             runner_name = runner.name.lower()
 
             if "draw" in runner_name or runner_name == "the draw":
+                self._runner_roles[runner.selection_id] = "draw"
                 # Skip draws if excluded - don't add to model probabilities
                 if not self.EXCLUDE_DRAWS:
                     self._model_probabilities[runner.selection_id] = prediction.draw_prob
                 # else: draw is excluded, no probability set = won't be bet on
             elif self._is_home_team(runner.name, home_team, market):
+                self._runner_roles[runner.selection_id] = "home"
                 self._model_probabilities[runner.selection_id] = prediction.home_win_prob
             else:
+                self._runner_roles[runner.selection_id] = "away"
                 self._model_probabilities[runner.selection_id] = prediction.away_win_prob
 
     def _parse_team_names(self, market: Market) -> tuple[Optional[str], Optional[str]]:

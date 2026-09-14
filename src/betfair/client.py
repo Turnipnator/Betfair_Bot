@@ -107,6 +107,17 @@ def _apply_betfair_timeouts() -> None:
             stack.append(sub)
 
 # Betfair event type IDs
+# Betfair competition ids for the three UEFA club competitions. The engine
+# fetches these by id: a European tie is in whichever country hosts it, so a
+# country filter cannot find it, and until 14 Sep 2026 the alternative was a
+# worldwide fetch capped at 50 results that Betfair filled on every scan.
+# Verified against listCompetitions on 14 Sep 2026.
+UEFA_COMPETITION_IDS = {
+    "228": "UEFA Champions League",
+    "2005": "UEFA Europa League",
+    "12375833": "UEFA Conference League",
+}
+
 EVENT_TYPE_IDS = {
     Sport.HORSE_RACING: "7",
     Sport.FOOTBALL: "1",
@@ -315,6 +326,8 @@ class BetfairClient:
             }
             if filter.countries:
                 filter_kwargs["market_countries"] = filter.countries
+            if filter.competition_ids:
+                filter_kwargs["competition_ids"] = list(filter.competition_ids)
 
             mf = market_filter(**filter_kwargs)
 
@@ -343,6 +356,17 @@ class BetfairClient:
                     max_results=filter.max_results,
                 ),
             )
+
+            if len(catalogues) >= filter.max_results:
+                # Betfair truncates silently. Until 14 Sep 2026 the UEFA fetch
+                # (no country filter, 50 results) hit this on every single scan.
+                logger.warning(
+                    "Market catalogue hit the result cap - markets may be missing",
+                    max_results=filter.max_results,
+                    sports=[getattr(s, "value", str(s)) for s in filter.sports],
+                    countries=filter.countries,
+                    competition_ids=filter.competition_ids,
+                )
 
             markets = []
             for cat in catalogues:

@@ -133,15 +133,51 @@ async def run():
             check("entry odds recorded", last()["detail"]["draw_odds"], 2.4)
             check("candidate consumed", "1.3" in s.get_candidates(), False)
 
+        # A first-half reading is held, not acted on (14 Sep 2026). Roma v
+        # Atalanta read 1-0 at 20' and Napoli v Bologna 0-1 at 6'; both were
+        # 0-0 at the whistle, both finished non-draw, and both had been
+        # deleted on that first reading.
+        print("goal reading before the whistle")
         await s.evaluate(make_market(market_id="1.4"))
         with patch.object(ltd_module.betfair_client, "get_match_state",
                           new=AsyncMock(return_value=ht_state(home=1, status="InProgress", minute=30))):
             records.clear()
             sig = await s.evaluate_halftime(make_market(market_id="1.4", draw_lay=2.4, in_play=True))
-            check("goal before HT: no signal", sig, None)
-            check("goal before HT: dropped", (last()["outcome"], last()["reason"]), ("dropped", "goal_before_ht"))
-            check("goal before HT: score kept", last()["detail"]["score"], "1-0")
-            check("goal before HT: candidate removed", "1.4" in s.get_candidates(), False)
+            check("first-half goal reading: no signal", sig, None)
+            check("first-half goal reading: nothing recorded", len(records), 0)
+            check("first-half goal reading: candidate held", "1.4" in s.get_candidates(), True)
+            check("first-half goal reading: remembered on the candidate",
+                  s.get_candidates()["1.4"].pre_ht_goal_reading, "1-0 at 30'")
+        with patch.object(ltd_module.betfair_client, "get_match_state",
+                          new=AsyncMock(return_value=ht_state(home=1, status="InProgress", minute=45))):
+            await s.evaluate_halftime(make_market(market_id="1.4", draw_lay=2.4, in_play=True))
+            check("45' InProgress (stoppage time) reading: still held", "1.4" in s.get_candidates(), True)
+        with patch.object(ltd_module.betfair_client, "get_match_state", new=AsyncMock(return_value=ht_state())):
+            records.clear()
+            sig = await s.evaluate_halftime(make_market(market_id="1.4", draw_lay=2.4, in_play=True))
+            check("0-0 at the whistle after a phantom reading: signal", sig is not None, True)
+            check("entry row says the reading did not stand", last()["detail"]["pre_ht_goal_reading"], "1-0 at 30'")
+            check("candidate consumed after the phantom", "1.4" in s.get_candidates(), False)
+
+        await s.evaluate(make_market(market_id="1.41"))
+        with patch.object(ltd_module.betfair_client, "get_match_state",
+                          new=AsyncMock(return_value=ht_state(home=1, status="HalfTime", minute=45))):
+            records.clear()
+            sig = await s.evaluate_halftime(make_market(market_id="1.41", draw_lay=2.4, in_play=True))
+            check("1-0 at HalfTime: no signal", sig, None)
+            check("1-0 at HalfTime: dropped", (last()["outcome"], last()["reason"]), ("dropped", "goal_before_ht"))
+            check("1-0 at HalfTime: score and status kept",
+                  (last()["detail"]["score"], last()["detail"]["status"]), ("1-0", "HalfTime"))
+            check("1-0 at HalfTime: candidate removed", "1.41" in s.get_candidates(), False)
+
+        await s.evaluate(make_market(market_id="1.42"))
+        with patch.object(ltd_module.betfair_client, "get_match_state",
+                          new=AsyncMock(return_value=ht_state(away=1, status="InProgress", minute=52))):
+            records.clear()
+            await s.evaluate_halftime(make_market(market_id="1.42", draw_lay=2.4, in_play=True))
+            check("0-1 at 52' (HalfTime status missed): dropped",
+                  (last()["outcome"], last()["reason"]), ("dropped", "goal_before_ht"))
+            check("0-1 at 52': candidate removed", "1.42" in s.get_candidates(), False)
 
         await s.evaluate(make_market(market_id="1.5"))
         with patch.object(ltd_module.betfair_client, "get_match_state", new=AsyncMock(return_value=ht_state())):
@@ -164,6 +200,7 @@ async def run():
             check("3.0 at the whistle: signal", sig is not None and sig.odds == 3.0, True)
             check("3.0 at the whistle: entered", (last()["outcome"], last()["reason"]), ("entered", "ht_entry"))
             check("3.0 at the whistle: status recorded", last()["detail"]["status"], "HalfTime")
+            check("clean entry: no phantom reading on the row", last()["detail"]["pre_ht_goal_reading"], None)
         await s.evaluate(make_market(market_id="1.56"))
         with patch.object(ltd_module.betfair_client, "get_match_state",
                           new=AsyncMock(return_value=ht_state(status="InProgress", minute=52))):
@@ -206,6 +243,24 @@ async def run():
         await s4.evaluate(make_market(market_id="4.2", competition="UEFA Champions League"))
         check("European tie bypasses stats", last()["outcome"], "candidate")
         check("European flag recorded", last()["detail"]["european"], True)
+
+    # A promoted side has no prior season in its new division, so in August it
+    # has one or two blended home games. That is an unknown quantity, and the
+    # funnel must say so rather than file it under home_goals with a 0.0 average.
+    print("insufficient games")
+    _home, away, league = stats()
+    thin_home = TeamStats("Coventry", home_played=1, home_goals_for=0, home_goals_against=1,
+                          away_played=1, away_goals_for=1, away_goals_against=2, matches_played=2)
+    with patch.object(ltd_module.football_data_service, "get_match_stats",
+                      new=AsyncMock(return_value=(thin_home, away, league))):
+        s5 = LayTheDrawStrategy()
+        s5.set_evaluation_sink(sink)
+        records.clear()
+        await s5.evaluate(make_market(market_id="5.1"))
+        check("one home game: insufficient_games, not home_goals", last()["reason"], "insufficient_games")
+        check("insufficient_games: counts recorded",
+              (last()["detail"]["home_played"], last()["detail"]["away_played"]), (1.0, 10.0))
+        check("insufficient_games: not a candidate", "5.1" in s5.get_candidates(), False)
 
 
 asyncio.run(run())

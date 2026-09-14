@@ -144,6 +144,12 @@ ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sed -E 's/\x1b\[[0-9;]*m//g' 
 
 ```bash
 ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header /tmp/bf.db \"SELECT id, strategy, selection_name, status, placed_at FROM bets WHERE status!='SETTLED' AND placed_at < datetime('now','-1 day');\"; sqlite3 /tmp/bf.db \"SELECT strategy, COUNT(*) FROM bets WHERE result='VOID' AND placed_at > datetime('now','-14 days') GROUP BY 1;\""
+# Any catalogue call that came back full (14 Sep 2026 build) — a fetch is silently truncated
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "cd /opt/betfair-bot/data/logs && cat \$(ls -r bot.log.* 2>/dev/null) bot.log | sed -E 's/\x1b\[[0-9;]*m//g' | grep -c 'Market catalogue hit the result cap'"
+# LTD half-time: entries vs drops, and how many entries followed a phantom first-half reading
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header /tmp/bf.db \"SELECT outcome, reason, COUNT(*) n, SUM(json_extract(detail,'$.pre_ht_goal_reading') IS NOT NULL) after_phantom, SUM(ht_home=0 AND ht_away=0) ht00 FROM strategy_evaluations WHERE strategy='lay_the_draw' AND stage='halftime' AND start_time > datetime('now','-7 days') GROUP BY 1,2;\""
+# Value betting funnel (14 Sep 2026 build): the binding filter per fixture
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header /tmp/bf.db \"SELECT reason, COUNT(*) n, SUM(ft_home IS NOT NULL) scored FROM strategy_evaluations WHERE strategy='value_betting' AND start_time > datetime('now','-7 days') GROUP BY 1 ORDER BY n DESC;\""
 # LTD funnel is being written and scored (table exists from the 2 Sep 2026 build)
 ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 /tmp/bf.db \"SELECT stage, outcome, COUNT(*) n, SUM(ft_home IS NOT NULL) scored FROM strategy_evaluations WHERE strategy='lay_the_draw' AND start_time > datetime('now','-7 days') GROUP BY 1,2;\""
 # nags_place funnel (13 Sep 2026 build): one verdict per race Nags had a pick in. A Nags primary

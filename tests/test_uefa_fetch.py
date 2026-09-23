@@ -45,6 +45,8 @@ print("engine wiring")
 engine_src = pathlib.Path("scripts/run_paper_trading.py").read_text()
 check("UEFA fetch passes the ids", "competition_ids=list(UEFA_COMPETITION_IDS)" in engine_src, True)
 check("UEFA fetch is no longer capped at 50", "max_results=50," in engine_src, False)
+# The domestic fetch filled its 100 on every scan of Sat 19 Sep 2026.
+check("domestic fetch is no longer capped at 100", "max_results=100," in engine_src, False)
 
 
 def shell(cat):

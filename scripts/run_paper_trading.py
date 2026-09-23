@@ -681,7 +681,11 @@ class PaperTradingEngine:
                 ],
                 from_hours=0.5,  # Starting in 30 mins
                 to_hours=12,  # Up to 12 hours ahead
-                max_results=100,
+                # 100 was full on every scan of Sat 19 Sep 2026 (660 cap
+                # warnings), so Saturday fixtures were silently dropped. 200
+                # is Betfair's ceiling for this projection (MARKET_DESCRIPTION
+                # weighs 1 per market); if it fills, split the countries.
+                max_results=200,
             )
 
             # Horse racing has different cadence: markets created ~1h before

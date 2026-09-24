@@ -396,6 +396,40 @@ taken after kick-off are purged at startup. Until this fix the job refreshed
 through the match and after settlement, so the "close" was the final in-play
 price (1.02 on a winner, −49% CLV). `tests/test_clv_preoff.py`.
 
+## Acca advisor (separate container, advisory only, 24 Sep 2026)
+
+`src/acca/`, entry `scripts/run_acca_advisor.py`, compose service
+`acca-advisor`. **It never places a bet.** It prices football from Betfair
+Exchange books, proposes 2-7 leg accumulators, and sends them to its **own**
+Telegram bot (`ACCA_TELEGRAM_BOT_TOKEN`; one poller per token) for Paul to
+place by hand at a bookmaker. Own ledger `data/acca.db`, own log
+`data/logs/acca.log`, own healthcheck. It shares only the image, the
+Betfair credentials and the data volume with the live bot.
+
+- **Fair price**: midpoint of best back/lay in probability space, scaled
+  proportionally to sum to one. Trusted only if the market has £5k+
+  matched, both sides on every runner, a tight spread, and LTP near the mid.
+  Double chance and draw no bet are derived exactly from match odds.
+- **Leg selection (option a)**: fair odds shortened ≥5% over 6h on ≥£2k
+  matched. Rationale: a bookmaker line is most likely stale, and so above
+  fair × 1.05, right after the Exchange moves. Legs expire 2h after they
+  start qualifying; a match is used in at most one acca.
+- **Figures**: minimum per leg = fair × 1.05; minimum combined = product of
+  leg minimums. Stake = quarter Kelly at the minimum combined price, capped
+  at 1% of `ACCA_BANK` and at the daily/weekly limits.
+- **Settlement** from Betfair runner statuses; all-REMOVED market = void
+  (1.00, acca continues); kick-off moved 24h+ = postponed, void; a closed
+  market with no single winner is never guessed (Telegram asks for
+  `/acca_result`). CLV per leg against the last pre-off Exchange fair price
+  is the primary metric (`/acca_stats`).
+- **Bookmaker feed later**: add rows to `acca_price_quotes` with
+  `source='bookmaker:<name>'`; legs and accas already carry `bookmaker`.
+- `ACCA_ALERTS_ENABLED=false` (default) is a dry run: accas are logged as
+  `dry_run` and only the 21:30 summary is sent.
+- **Deploy it alone**: `docker compose up -d --build acca-advisor`. A bare
+  `docker compose down` now stops both bots.
+- Tests: `tests/test_acca_advisor.py`.
+
 ## Telegram Commands
 
 Essential commands:

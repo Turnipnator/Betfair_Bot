@@ -117,12 +117,17 @@ no exceptions — but no bets being placed.
 **Run these checks every time:**
 
 ```bash
-# (a) Count recent "not logged in" warnings. Should be 0 since 2026-04-20 fix
-# (re-login now auto-recovers within 15 mins). >3 in the last hour = investigate.
-ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "docker logs betfair-bot --since 1h 2>&1 | grep -c 'not logged in to Betfair'"
+# (a) Session failures in the last 24h, both bots, from the on-disk logs (survive a deploy).
+# Expect none. Case-insensitive on purpose: the client logs "Not logged in to Betfair" with a
+# capital N, and until 24 Sep 2026 this check grepped lower-case and could never see it.
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "cd /opt/betfair-bot/data/logs && cat \$(ls -r bot.log.* acca.log.* 2>/dev/null) bot.log acca.log | sed -E 's/\x1b\[[0-9;]*m//g' | grep -E \"^(\$(date -u +%F)|\$(date -u -d yesterday +%F))\" | grep -ioE 'not logged in to Betfair|Keep-alive failed|attempting re-login|Betfair login failed' | sort | uniq -c | grep . || echo 'no session failures in 24h'"
 
-# (b) Confirm a recent successful login or keep-alive
-ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "docker logs betfair-bot --since 2h 2>&1 | grep -iE 'Successfully logged into Betfair|Session keep-alive successful|attempting re-login' | tail -10"
+# (b) Proof the session works NOW: age of the last successful Betfair call, per bot.
+# Keep-alives log at DEBUG, so they can't be the evidence. The live bot logs "Fetched markets"
+# after every successful catalogue call, every minute, even when the count is 0 (unlike
+# "Fetched market prices", which stops overnight when nothing is in the window). The advisor
+# logs "Acca scan" every 5 min. VPS local time is CEST, hence the explicit Z.
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "cd /opt/betfair-bot/data/logs && for f in bot acca; do [ \$f = bot ] && pat='Fetched markets ' || pat='Acca scan'; last=\$(sed -E 's/\x1b\[[0-9;]*m//g' \$f.log | grep \"\$pat\" | tail -1 | grep -oE '^[0-9T:-]+'); login=\$(cat \$(ls -r \$f.log.* 2>/dev/null) \$f.log | sed -E 's/\x1b\[[0-9;]*m//g' | grep 'Successfully logged into Betfair' | tail -1 | grep -oE '^[0-9T:-]+'); echo \"\$f: last successful call \$last UTC (\$(( \$(date +%s) - \$(date -d \"\${last}Z\" +%s) ))s ago), last login \${login:-not in logs}\"; done"
 
 # (c) Days since last bet placed — flag if bot is up but no bets for >48h AND Nags had picks (section 3)
 ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 /tmp/bf.db \"SELECT MAX(placed_at), CAST((julianday('now') - julianday(MAX(placed_at))) AS INTEGER) AS days_ago FROM bets;\""
@@ -136,8 +141,9 @@ ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sed -E 's/\x1b\[[0-9;]*m//g' 
 ```
 
 **Interpretation:**
-- 🔴 `not logged in` warnings recurring AND no `attempting re-login` messages = auto-recovery broken, container restart needed
-- 🟡 `attempting re-login` messages present = session dropped but recovered (working as designed)
+- 🔴 (b) last successful call older than 5 min (live bot) or 15 min (advisor) = session or scheduler dead
+- 🔴 `Not logged in` in (a) recurring AND no `attempting re-login` = auto-recovery broken, container restart needed
+- 🟡 `attempting re-login` / `Keep-alive failed` in (a) but (b) is fresh = dropped and recovered (working as designed)
 - 🔴 Container uptime >> days since last bet, with Nags picks present = trading effectively stopped
 
 ## 8. DATA INTEGRITY

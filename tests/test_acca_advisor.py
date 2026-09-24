@@ -299,4 +299,4 @@ async def e2e():
 asyncio.run(e2e())
 
 print(f"\n{PASS} passed, {FAIL} failed")
-sys.exit(1 if FAIL else 0)
+raise SystemExit(1 if FAIL else 0)

@@ -11,6 +11,9 @@ Run a comprehensive health check on the betfair-bot. Work through each section s
 - Server: 149.102.144.190
 - SSH Key: ~/.ssh/id_ed25519_vps
 - Container: betfair-bot (SQLite at /app/data/betfair_bot.db — there is NO separate betfair-db container)
+- Container: acca-advisor (since 24 Sep 2026; advisory football accas, **places no bets**).
+  Own ledger `/opt/betfair-bot/data/acca.db` (WAL, safe to query on the host directly with
+  `sqlite3`), own log `data/logs/acca.log`, own Telegram bot. Checked in section 9.
 - Path: /opt/betfair-bot (NOT a git checkout — files are scp'd; see section 6 for drift detection)
 - Note: `sqlite3` is not installed inside the container. To query the DB, copy it out first:
   `docker cp betfair-bot:/app/data/betfair_bot.db /tmp/bf.db && sqlite3 /tmp/bf.db "<query>"`
@@ -27,12 +30,14 @@ Run a comprehensive health check on the betfair-bot. Work through each section s
   (**WON/LOST/VOID** — not WIN/LOSS). `markets` is keyed by `id`, not `market_id`.
 
 ## 1. PROCESS STATUS
-- Is `betfair-bot` running and healthy? How long, and when did it start?
+- Are `betfair-bot` and `acca-advisor` running and healthy? How long, and when did each start?
+  They deploy independently (`docker compose up -d --build acca-advisor` leaves the live bot
+  alone), so different start times are normal.
 - `RestartCount` > 0 means Docker restarted it after a crash. `RestartCount` = 0 with a recent
   start means a deploy — confirm against local `git log` and the image build time.
 
 ```bash
-ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "docker ps --format '{{.Names}}\t{{.Status}}\t{{.RunningFor}}' | grep betfair && docker inspect -f 'started={{.State.StartedAt}} restarts={{.RestartCount}}' betfair-bot && docker image inspect \$(docker inspect betfair-bot --format '{{.Image}}') --format 'image_built={{.Created}}'"
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "docker ps --format '{{.Names}}\t{{.Status}}\t{{.RunningFor}}' | grep -E 'betfair|acca' && docker inspect -f '{{.Name}} started={{.State.StartedAt}} restarts={{.RestartCount}}' betfair-bot acca-advisor && docker image inspect \$(docker inspect betfair-bot --format '{{.Image}}') --format 'image_built={{.Created}}'"
 ```
 
 ## 2. LOG ANALYSIS
@@ -85,7 +90,7 @@ ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header /tmp/bf.db \"
 - RAM usage, disk space, CPU usage
 
 ```bash
-ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "free -h && echo '---' && df -h / && echo '---' && top -bn1 | head -12"
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "free -h && echo '---' && df -h / && echo '---' && top -bn1 | head -12 && echo '---' && docker stats --no-stream --format '{{.Name}} {{.MemUsage}} {{.CPUPerc}}' betfair-bot acca-advisor && ls -lh /opt/betfair-bot/data/acca.db*"
 ```
 
 ## 6. CONFIGURATION REVIEW
@@ -160,14 +165,55 @@ ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header /tmp/bf.db \"
 ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header 'file:/root/horse-racing-bot/data/racing.db?mode=ro' \"SELECT date(s.created_at) d, s.horse, s.selection_type, r.result, r.finish_position FROM selections s LEFT JOIN results r ON r.selection_id=s.id WHERE s.created_at > datetime('now','-14 days') AND s.superseded_at IS NULL ORDER BY s.created_at;\""
 ```
 
-## 9. STRATEGY EDGE ASSESSMENT
+## 9. ACCA ADVISOR (acca-advisor container)
+
+Advisory only: it prices football from the Exchange and sends accas to its own Telegram bot
+for Paul to place by hand. See CLAUDE.md, "Acca advisor". It holds its own Betfair session,
+so check it separately from section 7. **Read the mode first**: with `ACCA_ALERTS_ENABLED`
+unset or false it is a dry run (accas logged as `dry_run`, nothing sent but the 21:30
+summary), and with no `ACCA_TELEGRAM_BOT_TOKEN` it sends nothing at all. Neither is a fault.
+
+```bash
+# (a) Mode and limits (token redacted)
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "grep -E '^ACCA_' /opt/betfair-bot/.env | sed -E 's/(TOKEN)=.+/\1=<set>/' | grep . || echo 'no ACCA_ settings: dry run, no Telegram'"
+
+# (b) Scanning: one row per scan, every 5 min (expect ~12/hour). Latest scan should be < 10 min old.
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header /opt/betfair-bot/data/acca.db \"SELECT COUNT(*) scans_last_hour, MAX(at) latest FROM acca_scans WHERE at > datetime('now','-1 hour'); SELECT at, markets, trusted, qualified, pool, rejects FROM acca_scans ORDER BY id DESC LIMIT 5;\""
+
+# (c) Daily funnel: markets seen, trusted, legs qualifying, accas proposed
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header /opt/betfair-bot/data/acca.db \"SELECT date(at) d, COUNT(*) scans, MAX(markets) max_mkts, ROUND(AVG(trusted)) avg_trusted, MAX(qualified) max_qual, MAX(pool) max_pool FROM acca_scans WHERE at > datetime('now','-7 days') GROUP BY 1; SELECT date(created_at) d, status, COUNT(*) n, ROUND(AVG(n_legs),1) legs, ROUND(AVG(combined_fair_odds),2) fair, ROUND(SUM(suggested_stake),2) suggested FROM acca_accas WHERE created_at > datetime('now','-7 days') GROUP BY 1,2;\""
+
+# (d) Errors and warnings today, and its own Betfair session
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "cd /opt/betfair-bot/data/logs && cat \$(ls -r acca.log.* 2>/dev/null) acca.log | grep -h \"\$(date -u +%F)\" | sed -E 's/\x1b\[[0-9;]*m//g' | grep -E '\[(warning|error|critical)|Acca job failed' | cut -c1-250 | awk '{\$1=\"\"; print}' | sort | uniq -c | sort -rn | head -20; sed -E 's/\x1b\[[0-9;]*m//g' acca.log | grep -iE 'logged into Betfair|re-login|not logged in' | tail -3"
+
+# (e) Stuck legs: acca selections unsettled 72h+ after kick-off (Telegram should have asked for /acca_result)
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header /opt/betfair-bot/data/acca.db \"SELECT key, event_name, label, kickoff_original, kickoff, stuck_alerted_at FROM acca_selections WHERE result IS NULL AND key IN (SELECT selection_key FROM acca_legs) AND kickoff_original < datetime('now','-3 days');\""
+
+# (f) Health metric: CLV per leg (alert = fair at alert vs close; taken = your price vs close), and placed P&L
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header /opt/betfair-bot/data/acca.db \"SELECT COUNT(clv_alert) legs, ROUND(AVG(clv_alert),2) avg_alert_clv, ROUND(100.0*SUM(clv_alert>0)/COUNT(clv_alert),0) pct_pos, COUNT(clv_taken) taken_legs, ROUND(AVG(clv_taken),2) avg_taken_clv FROM acca_legs WHERE clv_alert IS NOT NULL; SELECT status, COUNT(*) n, SUM(result='WON') won, ROUND(SUM(taken_stake),2) staked, ROUND(SUM(pnl),2) pnl FROM acca_accas WHERE result IS NOT NULL GROUP BY 1;\""
+```
+
+**Interpretation:**
+- 🔴 No scan row in 15+ min, or `markets=0` on every scan (session dead: look for `not logged in` in (d))
+- 🔴 Stuck legs in (e) with no `stuck_alerted_at` = the settlement job is not running
+- `ACCA_TELEGRAM_BOT_TOKEN not set` once per start is expected until the bot is created.
+- 🟡 `Acca catalogue page full above the volume floor` in (d) = a market type needs splitting
+- 🟡 Low `trusted` is **not** a fault on international breaks or midweek: on 24 Sep 2026 (Nations
+  League week) only 17 match-odds markets worldwide had £5k matched inside 48h. Compare weekends
+  with weekends.
+- `qualified` stays 0 for up to 6h after a restart while price history rebuilds (warm start
+  reloads persisted quotes, so usually much less).
+- CLV (f) is the verdict, not P&L. Alert CLV persistently ≤ 0 over 30+ legs means the shortening
+  signal is noise. Tuning goes through RESEARCH.md; the health check reports, it does not retune.
+
+## 10. STRATEGY EDGE ASSESSMENT
 - Strike rate vs break-even from section 4; 30-day and all-time.
 - Which strategies are live vs paper: read `FORCE_PAPER_STRATEGIES` in
   `src/strategies/horse_racing.py`, not the CLAUDE.md table.
 - Is the strategy performing as expected? Any parameter tweaks recommended? Strategy changes
   follow RESEARCH.md — the health check reports, it does not retune.
 
-## 10. SECURITY POSTURE (quick)
+## 11. SECURITY POSTURE (quick)
 Baseline from the 1 Sep 2026 review of `../IG/security_report.md` against this bot, corrected
 on 13 Sep 2026 when the check found the first two items had never actually been true. Re-check
 that none of these have regressed; anything new gets its own line in recommendations.
@@ -182,26 +228,29 @@ that none of these have regressed; anything new gets its own line in recommendat
 
 ```bash
 ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "ls -ln /opt/betfair-bot/certs/ /opt/betfair-bot/.env; grep -nE '^(\.env|certs/)$' /opt/betfair-bot/.dockerignore; grep -n network_mode /opt/betfair-bot/docker-compose.yml; grep -c RedactSecretsFilter /opt/betfair-bot/config/logging_config.py"
-# The built image must NOT contain either (expect two 'No such file' lines)
-ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "docker run --rm --network none --entrypoint sh betfair-bot-betfair-bot:latest -c 'ls /app/.env /app/certs/client-2048.key' 2>&1"
+# Neither built image may contain either (expect four 'No such file' lines)
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "for img in betfair-bot-betfair-bot betfair-bot-acca-advisor; do docker run --rm --network none --entrypoint sh \$img:latest -c 'ls /app/.env /app/certs/client-2048.key' 2>&1; done"
 ```
 
-## 11. RUNNING THE TESTS
+## 12. RUNNING THE TESTS
 Every file in `tests/` is currently a script that `raise SystemExit`s at import (pytest collects nothing
 and aborts). Run pytest with those ignored (so any future real modules still run), then run the scripts with
-`PYTHONPATH=.`. On the VPS use a throwaway container from the built image (no volumes, no network):
+`PYTHONPATH=.`. On the VPS use a throwaway container from the built image (no volumes, no network).
+`tests/test_acca_advisor.py` needs `src/acca`, which is only in the `betfair-bot-acca-advisor`
+image until the live bot is next rebuilt, so run it from that image:
 
 ```bash
 ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "docker run --rm --network none --entrypoint sh betfair-bot-betfair-bot:latest -c 'S=\$(grep -l \"raise SystemExit\" tests/*.py); python -m pytest -q -p no:cacheprovider \$(echo \"\$S\" | sed \"s/^/--ignore=/\") tests/ | tail -3; for f in \$S; do PYTHONPATH=/app python \$f | tail -1; done'"
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "docker run --rm --network none --entrypoint sh betfair-bot-acca-advisor:latest -c 'PYTHONPATH=/app LOG_LEVEL=WARNING python tests/test_acca_advisor.py | tail -1'"
 ```
 
-## 12. RECOMMENDATIONS
+## 13. RECOMMENDATIONS
 Provide prioritised recommendations:
 - P1 (Critical): Issues that need immediate attention
 - P2 (Important): Should be addressed soon
 - P3 (Nice to have): Optimisations for later
 
-## 13. SUMMARY DASHBOARD
+## 14. SUMMARY DASHBOARD
 Present a quick status summary table:
 
 | Check | Status | Notes |
@@ -215,6 +264,7 @@ Present a quick status summary table:
 | Session Valid | ?/? | login/keep-alive, cert expiry |
 | Deployed = Repo | ?/? | md5 drift list |
 | Data Integrity | ?/? | stranded bets, VOID run, nags_place funnel rows |
+| Acca Advisor | ?/?/? | mode, scans/hour, trusted markets, stuck legs, leg CLV |
 | Strategy Edge | ?/?/? | strike vs break-even (side-aware) |
 | Security | ?/? | file modes, image free of secrets, redaction filter |
 | Tests | ?/? | script assertions passed in a throwaway container |

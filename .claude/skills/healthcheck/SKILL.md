@@ -68,7 +68,7 @@ ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "docker cp betfair-bot:/app/da
 # Bets per day, last 10 days
 ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 /tmp/bf.db \"SELECT date(placed_at), COUNT(*), GROUP_CONCAT(DISTINCT strategy) FROM bets WHERE placed_at > datetime('now','-10 days') GROUP BY 1 ORDER BY 1;\""
 # Nags picks per day (explains Nags-strategy quiet days) and whether Nags is on manual /run
-ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 'file:/root/horse-racing-bot/data/racing.db?mode=ro' \"SELECT date(created_at), COUNT(*) FROM selections WHERE created_at > datetime('now','-8 days') AND superseded_at IS NULL GROUP BY 1;\"; docker logs horse-racing-bot 2>&1 | grep -m1 -iE 'Auto-schedule'"
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 'file:/root/horse-racing-bot/data/racing.db?mode=ro' \"SELECT date(created_at), source, COUNT(*) FROM selections WHERE created_at > datetime('now','-8 days') AND superseded_at IS NULL GROUP BY 1,2;\"; docker logs horse-racing-bot 2>&1 | grep -m1 -iE 'Auto-schedule'"
 ```
 
 ## 4. PERFORMANCE METRICS
@@ -159,7 +159,10 @@ ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header /tmp/bf.db \"
 ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "cd /opt/betfair-bot/data/logs && cat \$(ls -r bot.log.* 2>/dev/null) bot.log | sed -E 's/\x1b\[[0-9;]*m//g' | grep -c 'Market catalogue hit the result cap'"
 # LTD half-time: entries vs drops, and how many entries followed a phantom first-half reading
 ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header /tmp/bf.db \"SELECT outcome, reason, COUNT(*) n, SUM(json_extract(detail,'$.pre_ht_goal_reading') IS NOT NULL) after_phantom, SUM(ht_home=0 AND ht_away=0) ht00 FROM strategy_evaluations WHERE strategy='lay_the_draw' AND stage='halftime' AND start_time > datetime('now','-7 days') GROUP BY 1,2;\""
-# Value betting funnel (14 Sep 2026 build): the binding filter per fixture
+# Value betting funnel (14 Sep 2026 build): the binding filter per fixture. `no_stats` dominates by design:
+# `no_stats` is checked before `league_tier`, and only tier 1/2 leagues are loaded (LEAGUE_FILES), so League 1/2,
+# National League, cups and youth leagues all land there. Only a covered league in `no_stats` is a fault — use the
+# alias query in CLAUDE.local.md #15 (match the competition names exactly; LIKE '%Ligue%' catches Ligue 3 and women's leagues).
 ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header /tmp/bf.db \"SELECT reason, COUNT(*) n, SUM(ft_home IS NOT NULL) scored FROM strategy_evaluations WHERE strategy='value_betting' AND start_time > datetime('now','-7 days') GROUP BY 1 ORDER BY n DESC;\""
 # LTD funnel is being written and scored (table exists from the 2 Sep 2026 build)
 ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 /tmp/bf.db \"SELECT stage, outcome, COUNT(*) n, SUM(ft_home IS NOT NULL) scored FROM strategy_evaluations WHERE strategy='lay_the_draw' AND start_time > datetime('now','-7 days') GROUP BY 1,2;\""
@@ -167,8 +170,10 @@ ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 /tmp/bf.db \"SELECT s
 # pick with NO row here was never matched to a PLACE market (or the daily cap was hit) — that is
 # the case to chase. `not_ew_eligible` with the numbers is the rule working as designed.
 ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header /tmp/bf.db \"SELECT date(start_time) d, time(start_time) t, event_name, outcome, reason, detail FROM strategy_evaluations WHERE strategy='nags_place' AND start_time > datetime('now','-7 days') ORDER BY start_time;\""
-# Nags's own view of its recent picks (nags_place takes the first of nap > next_best > selection > race_nb per race)
-ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header 'file:/root/horse-racing-bot/data/racing.db?mode=ro' \"SELECT date(s.created_at) d, s.horse, s.selection_type, r.result, r.finish_position FROM selections s LEFT JOIN results r ON r.selection_id=s.id WHERE s.created_at > datetime('now','-14 days') AND s.superseded_at IS NULL ORDER BY s.created_at;\""
+# Nags's own view of its recent picks (nags_place takes the first of nap > next_best > selection > race_nb per race).
+# Only source='bot' rows reach the Betfair bot. Paul also logs his own card as source='manual' most days, so
+# without the filter every horse shows twice (the 25 Sep 2026 check misread that as a supersede bug).
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header 'file:/root/horse-racing-bot/data/racing.db?mode=ro' \"SELECT date(s.created_at) d, s.horse, s.selection_type, r.result, r.finish_position FROM selections s LEFT JOIN results r ON r.selection_id=s.id WHERE s.created_at > datetime('now','-14 days') AND s.superseded_at IS NULL AND s.source='bot' ORDER BY s.created_at;\""
 ```
 
 ## 9. ACCA ADVISOR (acca-advisor container)

@@ -280,7 +280,7 @@ def calculate_hedge_stake(
 def calculate_freebet_hedge_stake(
     liability: float,
     current_odds: float,
-    commission_rate: float = 0.05,
+    commission_rate: Optional[float] = None,
 ) -> float:
     """
     Calculate hedge stake for "free bet" mode.
@@ -294,11 +294,15 @@ def calculate_freebet_hedge_stake(
     Args:
         liability: LAY liability (stake * (odds - 1))
         current_odds: Current draw BACK odds for hedging
-        commission_rate: Betfair commission rate (default 5%)
+        commission_rate: Betfair commission rate (default: settings.commission_rate)
 
     Returns:
         Hedge stake needed for break-even on draw
     """
+    if commission_rate is None:
+        from config import settings  # lazy: odds.py is otherwise config-free
+
+        commission_rate = settings.commission_rate
     effective_payout = (current_odds - 1) * (1 - commission_rate)
     if effective_payout <= 0:
         return 0.0

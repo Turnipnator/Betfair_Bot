@@ -28,6 +28,7 @@ from src.utils.stakes import (
     calculate_liability,
     calculate_stake,
     check_exposure_limits,
+    net_of_commission,
 )
 
 __all__ = [
@@ -58,5 +59,6 @@ __all__ = [
     "calculate_exposure",
     "calculate_liability",
     "calculate_stake",
+    "net_of_commission",
     "check_exposure_limits",
 ]

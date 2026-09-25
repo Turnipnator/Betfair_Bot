@@ -13,7 +13,7 @@ logger = get_logger(__name__)
 
 # Constants
 BETFAIR_MIN_STAKE = 2.00  # Betfair minimum bet
-COMMISSION_RATE = 0.05  # 5% Betfair commission
+COMMISSION_RATE = settings.commission_rate  # Betfair commission on winnings (config/settings.py)
 
 
 def calculate_stake(
@@ -150,7 +150,7 @@ def apply_commission(gross_profit: float, rate: float = COMMISSION_RATE) -> floa
 
     Args:
         gross_profit: Profit before commission
-        rate: Commission rate (default 5%)
+        rate: Commission rate (default: settings.commission_rate)
 
     Returns:
         Net profit after commission
@@ -158,6 +158,37 @@ def apply_commission(gross_profit: float, rate: float = COMMISSION_RATE) -> floa
     if gross_profit <= 0:
         return gross_profit
     return gross_profit * (1 - rate)
+
+
+def net_of_commission(
+    gross_profit: float,
+    betfair_commission: Optional[float] = None,
+    rate: Optional[float] = None,
+) -> tuple[float, float]:
+    """Net a live bet's cleared profit of commission.
+
+    Betfair's cleared-order `profit` is gross: commission is a separate ledger
+    item, and per bet the `commission` field is empty. Until 25 Sep 2026 the
+    reconciler stored that gross figure as the P&L, so every live win was
+    overstated by the commission (£7.11 over 63 wins, 9 Jul - 24 Sep). Uses
+    Betfair's own figure when it supplies one, otherwise the account rate,
+    rounded to the penny as Betfair's ledger rounds it.
+
+    Args:
+        gross_profit: Betfair's cleared profit for the bet
+        betfair_commission: Commission Betfair reported, if any
+        rate: Commission rate (default: settings.commission_rate)
+
+    Returns:
+        Tuple of (net profit, commission)
+    """
+    if betfair_commission:
+        commission = round(float(betfair_commission), 2)
+    elif gross_profit > 0:
+        commission = round(gross_profit * (COMMISSION_RATE if rate is None else rate), 2)
+    else:
+        commission = 0.0
+    return round(gross_profit - commission, 2), commission
 
 
 def calculate_break_even_odds(original_odds: float, commission: float = COMMISSION_RATE) -> float:

@@ -17,7 +17,7 @@ from src.risk import risk_manager
 logger = get_logger(__name__)
 
 # Betfair commission rate
-COMMISSION_RATE = 0.05
+COMMISSION_RATE = settings.commission_rate
 
 
 @dataclass

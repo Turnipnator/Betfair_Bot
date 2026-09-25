@@ -140,6 +140,10 @@ ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "openssl x509 -in /opt/betfair
 ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sed -E 's/\x1b\[[0-9;]*m//g' /opt/betfair-bot/data/logs/bot.log | grep -E 'Synced bankroll|Failed to sync balance' | tail -3"
 ```
 
+If the Betfair balance and £259.84 + the section 4 live P&L disagree by more than pennies, run
+`scripts/research/bankroll_gap.py` in the container (dry run; see CLAUDE.local.md #21). It
+lists every live bet whose DB figures differ from Betfair's cleared order net of 2% commission.
+
 **Interpretation:**
 - 🔴 (b) last successful call older than 5 min (live bot) or 15 min (advisor) = session or scheduler dead
 - 🔴 `Not logged in` in (a) recurring AND no `attempting re-login` = auto-recovery broken, container restart needed

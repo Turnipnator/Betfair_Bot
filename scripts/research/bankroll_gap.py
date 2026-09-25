@@ -1,91 +1,143 @@
-"""Reconcile the DB's live P&L against Betfair's own ledger. Read-only.
+"""Reconcile the DB's live P&L against Betfair's own ledger. Dry-run by default.
 
 Betfair keeps 90 days of account statement and cleared orders, so the
-comparison covers that window. Prints non-bet ledger items (deposits,
-withdrawals, adjustments), the exchange total per side, and every live bet
-whose DB P&L disagrees with Betfair's per-bet profit net of commission.
+comparison covers that window. Prints the ledger total and every live bet whose DB result, P&L,
+commission or stake disagrees with Betfair's cleared order, net of the
+commission Betfair charges (`settings.commission_rate`, see
+`net_of_commission`). With `--apply` it backs up the DB next to itself and
+writes Betfair's figures over the DB's.
 
-Run inside the live container: `python scripts/research/bankroll_gap.py`.
+Written 25 Sep 2026: the DB overstated live P&L by £8.44 over 9 Jul - 24 Sep.
+Commission was never netted on reconciled wins, the simulator assumed 5%
+where Betfair charges 2%, and two live bets Betfair paid nothing on (573,
+447) had been booked as wins by the football-results and market-status
+settlers. See tests/test_commission.py.
+
+Run inside the live container:
+  python scripts/research/bankroll_gap.py            # report only
+  python scripts/research/bankroll_gap.py --apply    # then restart betfair-bot
 """
 import asyncio
 import sqlite3
 import sys
-from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, "/app")
-from src.betfair.client import betfair_client  # noqa: E402
+from src.betfair.client import CLEARED_BET_STATUSES, betfair_client
+from src.utils import net_of_commission
 
-COMMISSION = 0.05
-TOLERANCE = 0.02
+DB_PATH = "/app/data/betfair_bot.db"
 WINDOW_DAYS = 89
+PENNY = 0.005
 
 
-async def main() -> None:
-    since = datetime.now(timezone.utc) - timedelta(days=WINDOW_DAYS)
+async def fetch(since: datetime) -> tuple[list, dict]:
+    """Betfair's account statement and cleared orders since `since`."""
     ok = await betfair_client.login()
     if not ok:
-        print("LOGIN FAILED")
-        return
+        raise SystemExit("LOGIN FAILED")
     api = betfair_client._client
     loop = asyncio.get_event_loop()
     rng = {"from": since.strftime("%Y-%m-%dT%H:%M:%SZ")}
 
-    # Account statement: every ledger movement, bets and cash alike.
-    items, from_record = [], 0
+    items, start = [], 0
     while True:
-        st = await loop.run_in_executor(None, lambda f=from_record: api.account.get_account_statement(
+        st = await loop.run_in_executor(None, lambda f=start: api.account.get_account_statement(
             item_date_range=rng, include_item="ALL", from_record=f, record_count=100))
         items += st.account_statement
         if not st.more_available:
             break
-        from_record += 100
-    by_class: dict[str, float] = defaultdict(float)
-    print("NON-EXCHANGE LEDGER ITEMS:")
-    for it in items:
-        cls = str(getattr(it, "item_class", "?"))
-        by_class[cls] += it.amount
-        if "EXCHANGE" not in cls.upper():
-            print(f"  {it.item_date} {cls} amount={it.amount} balance={it.balance}")
-    print("LEDGER TOTAL BY CLASS:", {k: round(v, 2) for k, v in by_class.items()})
-    if items:
-        print("OLDEST ITEM", items[-1].item_date, "balance after", items[-1].balance)
-        print("NEWEST ITEM", items[0].item_date, "balance after", items[0].balance)
+        start += 100
 
-    # Cleared orders per bet, all terminal statuses.
-    cleared: dict[str, float] = {}
-    for status in ("SETTLED", "VOIDED", "LAPSED", "CANCELLED"):
+    cleared: dict[str, dict] = {}
+    for status in CLEARED_BET_STATUSES:
         start = 0
         while True:
             r = await loop.run_in_executor(None, lambda s=status, f=start: api.betting.list_cleared_orders(
                 bet_status=s, settled_date_range=rng, from_record=f, record_count=1000))
             for o in r.orders:
-                p = o.profit or 0.0
-                cleared[o.bet_id] = round(p * (1 - COMMISSION) if p > 0 else p, 2)
+                cleared[str(o.bet_id)] = {"status": status, "outcome": o.bet_outcome,
+                                          "profit": o.profit or 0.0, "size": o.size_settled}
             if not r.more_available:
                 break
             start += 1000
     await betfair_client.logout()
+    return items, cleared
 
-    con = sqlite3.connect("/app/data/betfair_bot.db")
+
+def target(order: dict) -> tuple[str, float, float, float | None]:
+    """(result, P&L, commission, stake) the DB should hold for a cleared order."""
+    if order["status"] != "SETTLED" or order["outcome"] not in ("WON", "LOST"):
+        return "VOID", 0.0, 0.0, None  # nothing matched or settled: no money moved
+    pnl, commission = net_of_commission(order["profit"])
+    return order["outcome"], pnl, commission, order["size"]
+
+
+def main() -> None:
+    apply = "--apply" in sys.argv
+    since = datetime.now(timezone.utc) - timedelta(days=WINDOW_DAYS)
+    items, cleared = asyncio.run(fetch(since))
+
+    # The statement is the whole account (bets, commission, any cash moved),
+    # so after corrections the DB total should land on it to the penny.
+    ledger_total = round(sum(it.amount for it in items), 2)
+    print(f"LEDGER: {len(items)} items, total {ledger_total:+.2f}")
+    if items:
+        print(f"  oldest {items[-1].item_date} balance {items[-1].balance}, "
+              f"newest {items[0].item_date} balance {items[0].balance}")
+
+    con = sqlite3.connect(DB_PATH)
     rows = con.execute(
-        "SELECT id, strategy, bet_ref, selection_name, placed_at, settled_at, result, profit_loss "
-        "FROM bets WHERE bet_ref NOT LIKE 'PAPER-%' AND settled_at >= ?",
-        (since.strftime("%Y-%m-%d %H:%M:%S"),)).fetchall()
-    db_total = sum(r[7] or 0 for r in rows)
-    bf_total = sum(cleared.values())
-    print(f"\nWINDOW since {since:%Y-%m-%d}: DB live bets={len(rows)} pnl={db_total:.2f} | "
-          f"Betfair cleared bets={len(cleared)} net pnl={bf_total:.2f}")
-    print("MISMATCHES (DB vs Betfair net):")
-    seen = set()
-    for r in rows:
-        seen.add(r[2])
-        bf = cleared.get(r[2])
-        if bf is None or abs((r[7] or 0) - bf) > TOLERANCE:
-            print(f"  id={r[0]} {r[1]} {r[3]} {r[4]} {r[6]} db={r[7]} betfair={bf}")
-    for ref, p in cleared.items():
-        if ref not in seen:
-            print(f"  NOT IN DB WINDOW: bet {ref} betfair={p}")
+        "SELECT id, strategy, bet_ref, selection_name, placed_at, result, profit_loss, "
+        "commission, stake FROM bets WHERE bet_ref NOT LIKE 'PAPER-%' AND status='SETTLED' "
+        "AND settled_at >= ?", (since.strftime("%Y-%m-%d %H:%M:%S"),)).fetchall()
+
+    changes, unmatched = [], []
+    for bid, strat, ref, sel, placed, result, pnl, comm, stake in rows:
+        order = cleared.get(str(ref))
+        if order is None:
+            unmatched.append((bid, strat, sel, placed, result, pnl))
+            continue
+        t_result, t_pnl, t_comm, t_stake = target(order)
+        new_stake = t_stake if t_stake and abs(t_stake - (stake or 0)) > PENNY else stake
+        if (t_result != result or abs(t_pnl - (pnl or 0)) > PENNY
+                or abs(t_comm - (comm or 0)) > PENNY or new_stake != stake):
+            changes.append((bid, strat, sel, placed[:16], order["status"], result, pnl, comm,
+                            stake, t_result, t_pnl, t_comm, new_stake))
+
+    db_before = round(sum(r[6] or 0 for r in rows), 2)
+    delta = sum(c[10] - (c[6] or 0) for c in changes)
+    print(f"\nWINDOW since {since:%Y-%m-%d}: {len(rows)} live bets in DB, {len(cleared)} cleared on Betfair")
+    print(f"  DB P&L now {db_before:+.2f}, after corrections {db_before + delta:+.2f}, "
+          f"ledger {ledger_total:+.2f}")
+
+    print(f"\nCORRECTIONS ({len(changes)}):")
+    for c in changes:
+        stake_note = f" stake {c[8]}->{c[12]}" if c[12] != c[8] else ""
+        print(f"  id={c[0]} {c[1]} {c[2]} {c[3]} betfair={c[4]}: "
+              f"{c[5]} {c[6]:+.2f} (comm {c[7] or 0:.2f}) -> {c[9]} {c[10]:+.2f} (comm {c[11]:.2f}){stake_note}")
+    if unmatched:
+        print(f"\nLIVE BETS BETFAIR HAS NO CLEARED ORDER FOR (left alone, {len(unmatched)}):")
+        for u in unmatched:
+            print(f"  id={u[0]} {u[1]} {u[2]} {u[3]} {u[4]} {u[5]}")
+
+    if not apply:
+        print("\nDry run. Re-run with --apply to write these, then restart betfair-bot.")
+        return
+    if not changes:
+        print("\nNothing to apply.")
+        return
+    backup = f"{DB_PATH}.bak-{datetime.now(timezone.utc):%Y%m%dT%H%M%S}"
+    src = sqlite3.connect(backup)
+    con.backup(src)
+    src.close()
+    with con:
+        for c in changes:
+            con.execute("UPDATE bets SET result=?, profit_loss=?, commission=?, stake=? WHERE id=?",
+                        (c[9], c[10], c[11], c[12], c[0]))
+    print(f"\nAPPLIED {len(changes)} corrections. Backup: {backup}. "
+          f"Restart betfair-bot so it reloads its figures.")
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    main()

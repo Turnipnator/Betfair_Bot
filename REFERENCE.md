@@ -206,7 +206,7 @@ class BaseStrategy(ABC):
 ## Paper Trading Rules
 
 1. Use real market odds at moment of signal
-2. Simulate 5% commission on winnings
+2. Simulate commission on winnings (`settings.commission_rate`, 2% since 25 Sep 2026)
 3. Track signal time vs "placement" time
 4. Settle from actual race/match results
 5. No hindsight - cannot use future price data

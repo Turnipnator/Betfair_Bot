@@ -702,8 +702,11 @@ class BetfairClient:
                     "price_requested": order.price_requested,
                     "price_matched": order.price_matched,
                     "size_settled": order.size_settled,
-                    "profit": order.profit,  # Net P&L after commission
-                    "commission": order.commission if hasattr(order, "commission") else 0,
+                    # GROSS: Betfair charges commission as a separate ledger
+                    # item and only fills `commission` when orders are grouped
+                    # by market, so per bet it is None. The reconciler nets it.
+                    "profit": order.profit,
+                    "commission": getattr(order, "commission", None),
                     "settled_date": order.settled_date,
                     "bet_outcome": order.bet_outcome,  # WON, LOST, or None
                 })

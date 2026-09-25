@@ -166,14 +166,18 @@ class Bet:
             placed_at=datetime.utcnow(),
         )
 
-    def settle(self, result: BetResult, commission_rate: float = 0.05) -> None:
+    def settle(self, result: BetResult, commission_rate: Optional[float] = None) -> None:
         """
         Settle the bet with a result.
 
         Args:
             result: Win, lose, or void
-            commission_rate: Betfair commission rate (default 5%)
+            commission_rate: Betfair commission rate (default: settings.commission_rate)
         """
+        if commission_rate is None:
+            from config import settings  # lazy: models stay importable without config
+
+            commission_rate = settings.commission_rate
         self.result = result
         self.settled_at = datetime.utcnow()
         self.status = BetStatus.SETTLED

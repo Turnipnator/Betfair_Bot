@@ -60,6 +60,7 @@ from src.utils import (
     calculate_kelly_stake,
     closing_line_capturable,
     compute_clv_percent,
+    net_of_commission,
 )
 from src.data.football_data import football_data_service
 from src.betfair.execution import order_executor
@@ -67,6 +68,19 @@ from src.streaming.stream_manager import StreamManager
 from src.streaming.ltd_monitor import LTDStreamMonitor
 
 logger = get_logger(__name__)
+
+
+def settles_on_betfair(bet: Bet) -> bool:
+    """True for a real-money bet: it carries Betfair's bet id, not a PAPER- ref.
+
+    Such a bet settles ONLY from Betfair's cleared orders
+    (`reconcile_with_betfair`). The market-status and football-results
+    settlers assume the bet was matched and book the simulator's P&L, which is
+    a guess about real money: LTD bet 573 (5 Sep 2026) was booked WON +£9.50
+    from the final score when Betfair never matched it (profit 0), and
+    nags_place bet 447 (7 Aug) was booked WON +£2.66 the same way.
+    """
+    return bool(bet.bet_ref) and not bet.bet_ref.startswith("PAPER-")
 
 
 class PaperTradingEngine:
@@ -1033,7 +1047,9 @@ class PaperTradingEngine:
             logger.error("Error managing positions", error=str(e))
 
     async def _settle_bet_from_market(self, bet: Bet, market) -> None:
-        """Settle a bet based on market result."""
+        """Settle a paper bet based on market result."""
+        if settles_on_betfair(bet):
+            return  # real money: reconcile_with_betfair settles it from Betfair
         try:
             # Ensure bet has event_name for notifications
             if hasattr(market, 'event_name') and market.event_name:
@@ -1132,7 +1148,8 @@ class PaperTradingEngine:
             stale_threshold = datetime.now(timezone.utc) - timedelta(hours=4)
             stale_bets = [
                 b for b in open_bets
-                if (b.placed_at.replace(tzinfo=timezone.utc) if b.placed_at.tzinfo is None else b.placed_at) < stale_threshold
+                if not settles_on_betfair(b)  # real money settles from Betfair only
+                and (b.placed_at.replace(tzinfo=timezone.utc) if b.placed_at.tzinfo is None else b.placed_at) < stale_threshold
             ]
 
             if not stale_bets:
@@ -1493,7 +1510,7 @@ class PaperTradingEngine:
                 return
 
             # Only reconcile bets that have a Betfair bet reference
-            bets_with_ref = [b for b in open_bets if b.bet_ref and not b.bet_ref.startswith("PAPER-")]
+            bets_with_ref = [b for b in open_bets if settles_on_betfair(b)]
             if not bets_with_ref:
                 logger.info(
                     "Reconciliation: open bets have no Betfair refs",
@@ -1571,8 +1588,8 @@ class PaperTradingEngine:
                 # Determine result from Betfair's data
                 bet_outcome = cleared.get("bet_outcome")
                 bet_status = cleared.get("bet_status", "SETTLED")
-                profit = cleared.get("profit") or 0.0
-                commission = cleared.get("commission") or 0.0
+                gross = cleared.get("profit") or 0.0
+                profit, commission = net_of_commission(gross, cleared.get("commission"))
 
                 # VOIDED (non-runner, abandoned), LAPSED (never matched, lapsed
                 # at the off) and CANCELLED all mean no money changed hands:
@@ -1634,7 +1651,8 @@ class PaperTradingEngine:
                     )
 
                 if success:
-                    # Override with Betfair's actual profit (includes exact commission)
+                    # Override the simulator's figure with Betfair's, net of
+                    # the commission Betfair charges (see net_of_commission)
                     bet.profit_loss = profit
                     bet.commission = commission
 
@@ -1655,7 +1673,7 @@ class PaperTradingEngine:
                                 await bet_repo.settle(
                                     bet.id,
                                     bet.result,
-                                    profit,  # Use Betfair's actual P&L
+                                    profit,  # Betfair's P&L, net of commission
                                     commission,
                                 )
                                 await session.commit()

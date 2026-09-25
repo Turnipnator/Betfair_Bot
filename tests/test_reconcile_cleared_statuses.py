@@ -170,15 +170,16 @@ for st in ("LAPSED", "CANCELLED"):
     check(f"{st}: result VOID", bet.result, BetResult.VOID)
     check(f"{st}: DB written", [c[:2] for c in _Repo.calls], [(574, BetResult.VOID)])
 
-print("3. SETTLED WON still settles as a win with Betfair's P&L")
+print("3. SETTLED WON still settles as a win with Betfair's P&L, net of commission")
 _reset()
 bet = _bet()
 e = _engine(bet)
 _Betfair.cleared = [_order("SETTLED", outcome="WON", profit=2.66)]
 run(e)
 check("result WON", bet.result, BetResult.WON)
-check("P&L is Betfair's", bet.profit_loss, 2.66)
-check("DB settle WON", [c[:3] for c in _Repo.calls], [(574, BetResult.WON, 2.66)])
+# Betfair's cleared profit is gross; 2% of 2.66 is 0.05 (test_commission.py)
+check("P&L is Betfair's, net", bet.profit_loss, 2.61)
+check("DB settle WON", _Repo.calls, [(574, BetResult.WON, 2.61, 0.05)])
 
 print("4. SETTLED LOST on a LAY means the selection won")
 _reset()

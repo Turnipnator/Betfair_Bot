@@ -224,6 +224,18 @@ can never exhaust the budget and lock the live win leg out of a real bet.
 
 ### Settlement
 
+- **Every live bet, any sport, settles from Betfair only** (25 Sep 2026). A
+  bet whose ref is a Betfair bet id (`settles_on_betfair`) is skipped by the
+  market-status and football-results settlers, which assume a match and book
+  the simulator's P&L: LTD bet 573 was booked WON +£9.50 from the final score
+  when Betfair never matched it, and nags_place bet 447 WON +£2.66 the same
+  way. Cleared-order `profit` is **gross**; Betfair charges commission as a
+  separate ledger item and leaves the per-bet field empty, so the reconciler
+  books `net_of_commission(profit)`. Until then every reconciled win was
+  stored gross and every simulator-settled one at 5%, and the DB ran £8.44
+  ahead of the account over 9 Jul-24 Sep. `scripts/research/bankroll_gap.py`
+  checks the DB against Betfair's statement (dry run; `--apply` writes
+  Betfair's figures). `tests/test_commission.py`.
 - **Live** HR bets settle from Betfair cleared orders (`reconcile_with_betfair`),
   queried under **all four** terminal statuses. Betfair files a void (non-runner,
   abandoned) under `VOIDED`, an unmatched bet that lapsed at the off under
@@ -459,7 +471,8 @@ Generated Sunday 23:59. Must show:
 
 - **Cert auth required** - Need SSL certs uploaded to Betfair account
 - **Market IDs are temporary** - Horse racing markets created ~1hr before race
-- **5% commission** - Factor into all profit calculations
+- **2% commission** on net winnings, not 5% - the account statement shows 2% on every win
+  (checked 25 Sep 2026). One setting, `COMMISSION_RATE` (`settings.commission_rate`); see Settlement
 - **£2 minimum stake**
 - **20 requests/sec rate limit**
 - **Use streaming API for in-play** - Polling too slow

@@ -244,6 +244,17 @@ class Settings(BaseSettings):
         alias="PAPER_BANKROLL",
         description="Starting bankroll for paper trading",
     )
+    # The rate Betfair actually charges on net market winnings. The account
+    # statement shows 2% on every settled win (10.00 -> 0.20, 25.00 -> 0.50,
+    # checked 25 Sep 2026 across 63 wins since 9 Jul), not the 5% the code
+    # assumed. Change it here if Betfair changes the account's rate.
+    commission_rate: float = Field(
+        default=0.02,
+        alias="COMMISSION_RATE",
+        ge=0.0,
+        lt=1.0,
+        description="Betfair commission on net winnings (0.02 = 2%)",
+    )
 
     # Database
     database_type: DatabaseType = Field(

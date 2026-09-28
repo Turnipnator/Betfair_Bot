@@ -73,7 +73,10 @@ ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 'file:/root/horse-rac
 
 ## 4. PERFORMANCE METRICS
 - Recent P&L from the database (last 14 days), then strike rate vs break-even per strategy.
-  Break-even strike % depends on the side: **BACK = 100 / avg odds; LAY = 100 × (1 − 1 / avg odds)**.
+  Break-even strike % depends on the side, and includes the **2% commission** Betfair takes off
+  every win (a win pays (odds − 1) × 0.98 on a back, stake × 0.98 on a lay; a loss costs the full
+  stake or liability): **BACK = 100 / (1 + (avg odds − 1) × 0.98); LAY = 100 × (avg odds − 1) /
+  ((avg odds − 1) + 0.98)**. Commission *raises* break-even: a 2.14 back needs 47.2%, not 46.7%.
   A lay at 2.70 needs to win 63% of the time, not 37% — the 13 Sep 2026 check nearly credited
   LTD with a 25-point edge it does not have. The query below picks the formula from `bet_type`.
   A strategy whose strike rate sits below its break-even is losing regardless of what the
@@ -81,7 +84,7 @@ ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 'file:/root/horse-rac
 
 ```bash
 ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 /tmp/bf.db 'SELECT strategy, status, result, COUNT(*), ROUND(SUM(profit_loss),2) FROM bets WHERE placed_at > datetime(\"now\",\"-14 days\") GROUP BY strategy, status, result;'"
-ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header /tmp/bf.db \"SELECT strategy, bet_type, CASE WHEN bet_ref LIKE 'PAPER-%' THEN 'paper' ELSE 'live' END mode, COUNT(*) n, ROUND(AVG(matched_odds),2) avg_odds, ROUND(100.0*SUM(result='WON')/COUNT(*),1) strike_pct, ROUND(CASE WHEN bet_type='LAY' THEN 100.0*(1-1.0/AVG(matched_odds)) ELSE 100.0/AVG(matched_odds) END,1) breakeven_pct, ROUND(SUM(profit_loss),2) pnl, ROUND(100*SUM(profit_loss)/SUM(stake),1) roi_pct FROM bets WHERE status='SETTLED' AND result IN ('WON','LOST') AND placed_at > datetime('now','-30 days') GROUP BY 1,2,3;\""
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header /tmp/bf.db \"SELECT strategy, bet_type, CASE WHEN bet_ref LIKE 'PAPER-%' THEN 'paper' ELSE 'live' END mode, COUNT(*) n, ROUND(AVG(matched_odds),2) avg_odds, ROUND(100.0*SUM(result='WON')/COUNT(*),1) strike_pct, ROUND(CASE WHEN bet_type='LAY' THEN 100.0*(AVG(matched_odds)-1)/((AVG(matched_odds)-1)+0.98) ELSE 100.0/(1+(AVG(matched_odds)-1)*0.98) END,1) breakeven_pct, ROUND(SUM(profit_loss),2) pnl, ROUND(100*SUM(profit_loss)/SUM(stake),1) roi_pct FROM bets WHERE status='SETTLED' AND result IN ('WON','LOST') AND placed_at > datetime('now','-30 days') GROUP BY 1,2,3;\""
 # Live money only, since the 27 Feb 2026 bankroll reset (compare with the Betfair balance in section 7e)
 ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header /tmp/bf.db \"SELECT strategy, COUNT(*) n, ROUND(SUM(COALESCE(profit_loss,0)),2) live_pnl FROM bets WHERE bet_ref NOT LIKE 'PAPER-%' AND placed_at > '2026-02-27' GROUP BY 1;\""
 ```

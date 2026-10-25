@@ -375,6 +375,14 @@ side has no prior season in its new division, so until late September it is
 an unknown quantity, and the funnel now says so (7 of the 45 weekend
 `home_goals` rejections on 12–13 Sep were 0.0 averages of this kind).
 
+**Near misses at the half-time cap are recorded (25 Oct 2026).** The funnel
+keeps only a match's latest verdict, so RB Leipzig v Elversberg (24 Oct: 0-0
+at HT, draw 3.25 against the 3.2 cap all interval, 1-0 at 47', won 4-0) left
+only a `goal_before_ht` row. The candidate now carries `ht_min_draw_odds`
+(lowest rejected HT price) and `ht_odds_rejections`, written on the
+`ht_odds_range`, `goal_before_ht` and `ht_entry` rows, so the cost of the cap
+is a query (healthcheck section 8). `tests/test_ltd_funnel.py`.
+
 ### UEFA markets are fetched by competition id (14 Sep 2026)
 
 A European tie is in whichever country hosts it, so the second football fetch

@@ -187,6 +187,21 @@ async def run():
             check("HT odds out of range: recorded", last()["reason"], "ht_odds_range")
             check("HT odds out of range: status kept", last()["detail"]["status"], "HalfTime")
             check("HT odds out of range: candidate kept", "1.5" in s.get_candidates(), True)
+            await s.evaluate_halftime(make_market(market_id="1.5", draw_lay=3.25, in_play=True))
+            check("closest rejected price carried on the row", last()["detail"]["ht_min_draw_odds"], 3.25)
+            await s.evaluate_halftime(make_market(market_id="1.5", draw_lay=3.3, in_play=True))
+            check("a wider price does not replace the closest one",
+                  (last()["detail"]["ht_min_draw_odds"], last()["detail"]["ht_odds_rejections"]), (3.25, 3))
+        # RB Leipzig v Elversberg (24 Oct 2026): 3.25 all interval, then a 47'
+        # goal. The drop row overwrites the ht_odds_range row, so it must carry
+        # the near miss itself.
+        with patch.object(ltd_module.betfair_client, "get_match_state",
+                          new=AsyncMock(return_value=ht_state(home=1, status="InProgress", minute=47))):
+            records.clear()
+            await s.evaluate_halftime(make_market(market_id="1.5", draw_lay=4.0, in_play=True))
+            check("goal after a cap miss: dropped", (last()["outcome"], last()["reason"]), ("dropped", "goal_before_ht"))
+            check("goal after a cap miss: near miss kept on the drop row",
+                  (last()["detail"]["ht_min_draw_odds"], last()["detail"]["ht_odds_rejections"]), (3.25, 3))
 
         # Cap raised 2.8 -> 3.2 on 12 Sep 2026: a 0-0 HT draw for this profile
         # trades ~2.9-3.2 at the whistle, and the old cap made the bot wait into
@@ -201,6 +216,7 @@ async def run():
             check("3.0 at the whistle: entered", (last()["outcome"], last()["reason"]), ("entered", "ht_entry"))
             check("3.0 at the whistle: status recorded", last()["detail"]["status"], "HalfTime")
             check("clean entry: no phantom reading on the row", last()["detail"]["pre_ht_goal_reading"], None)
+            check("clean entry at the whistle: no rejected readings", last()["detail"]["ht_odds_rejections"], 0)
         await s.evaluate(make_market(market_id="1.56"))
         with patch.object(ltd_module.betfair_client, "get_match_state",
                           new=AsyncMock(return_value=ht_state(status="InProgress", minute=52))):

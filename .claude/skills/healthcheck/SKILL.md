@@ -22,7 +22,7 @@ Run a comprehensive health check on the betfair-bot. Work through each section s
   minutes old. The full history is on disk at `/opt/betfair-bot/data/logs/bot.log` (rotates
   to `bot.log.1..10`, ~10MB each, roughly a week at INFO since the 13 Sep 2026 volume cut).
   `bot.log` itself can be minutes old, so grep **all** rotated files, oldest first:
-  `cat $(ls -r /opt/betfair-bot/data/logs/bot.log.* ) /opt/betfair-bot/data/logs/bot.log`.
+  `cat $(ls -rv /opt/betfair-bot/data/logs/bot.log.* ) /opt/betfair-bot/data/logs/bot.log`.
   Strip ANSI with `sed -E 's/\x1b\[[0-9;]*m//g'` before grepping.
 - Nags DB (read-only mount): `/root/horse-racing-bot/data/racing.db`. Query on the host with
   `sqlite3 'file:/root/horse-racing-bot/data/racing.db?mode=ro' "<query>"`.
@@ -49,9 +49,9 @@ ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "docker ps --format '{{.Names}
 ```bash
 ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "docker compose -f /opt/betfair-bot/docker-compose.yml logs --tail 100 betfair-bot 2>&1"
 # Whole day, deduplicated, from disk (all rotated files — bot.log alone may be minutes deep)
-ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "cd /opt/betfair-bot/data/logs && cat \$(ls -r bot.log.* 2>/dev/null) bot.log | grep -h \"\$(date -u +%F)\" | sed -E 's/\x1b\[[0-9;]*m//g' | grep -E '\[(warning|error|critical)' | grep -v 'HR parse' | cut -c1-300 | awk '{\$1=\"\"; print}' | sort | uniq -c | sort -rn | head -40"
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "cd /opt/betfair-bot/data/logs && cat \$(ls -rv bot.log.* 2>/dev/null) bot.log | grep -h \"\$(date -u +%F)\" | sed -E 's/\x1b\[[0-9;]*m//g' | grep -E '\[(warning|error|critical)' | grep -v 'HR parse' | cut -c1-300 | awk '{\$1=\"\"; print}' | sort | uniq -c | sort -rn | head -40"
 # How far back the on-disk history reaches (should be days, not hours)
-ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "cd /opt/betfair-bot/data/logs && sed -E 's/\x1b\[[0-9;]*m//g' \$(ls -r bot.log.* | head -1) | grep -m1 -oE '^20[0-9-]+T[0-9:]+'"
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "cd /opt/betfair-bot/data/logs && sed -E 's/\x1b\[[0-9;]*m//g' \$(ls -rv bot.log.* | head -1) | grep -m1 -oE '^20[0-9-]+T[0-9:]+'"
 ```
 
 ## 3. SIGNAL GENERATION
@@ -123,14 +123,14 @@ no exceptions — but no bets being placed.
 # (a) Session failures in the last 24h, both bots, from the on-disk logs (survive a deploy).
 # Expect none. Case-insensitive on purpose: the client logs "Not logged in to Betfair" with a
 # capital N, and until 24 Sep 2026 this check grepped lower-case and could never see it.
-ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "cd /opt/betfair-bot/data/logs && cat \$(ls -r bot.log.* acca.log.* 2>/dev/null) bot.log acca.log | sed -E 's/\x1b\[[0-9;]*m//g' | grep -E \"^(\$(date -u +%F)|\$(date -u -d yesterday +%F))\" | grep -ioE 'not logged in to Betfair|Keep-alive failed|attempting re-login|Betfair login failed' | sort | uniq -c | grep . || echo 'no session failures in 24h'"
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "cd /opt/betfair-bot/data/logs && cat \$(ls -rv bot.log.* acca.log.* 2>/dev/null) bot.log acca.log | sed -E 's/\x1b\[[0-9;]*m//g' | grep -E \"^(\$(date -u +%F)|\$(date -u -d yesterday +%F))\" | grep -ioE 'not logged in to Betfair|Keep-alive failed|attempting re-login|Betfair login failed' | sort | uniq -c | grep . || echo 'no session failures in 24h'"
 
 # (b) Proof the session works NOW: age of the last successful Betfair call, per bot.
 # Keep-alives log at DEBUG, so they can't be the evidence. The live bot logs "Fetched markets"
 # after every successful catalogue call, every minute, even when the count is 0 (unlike
 # "Fetched market prices", which stops overnight when nothing is in the window). The advisor
 # logs "Acca scan" every 5 min. VPS local time is CEST, hence the explicit Z.
-ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "cd /opt/betfair-bot/data/logs && for f in bot acca; do [ \$f = bot ] && pat='Fetched markets ' || pat='Acca scan'; last=\$(sed -E 's/\x1b\[[0-9;]*m//g' \$f.log | grep \"\$pat\" | tail -1 | grep -oE '^[0-9T:-]+'); login=\$(cat \$(ls -r \$f.log.* 2>/dev/null) \$f.log | sed -E 's/\x1b\[[0-9;]*m//g' | grep 'Successfully logged into Betfair' | tail -1 | grep -oE '^[0-9T:-]+'); echo \"\$f: last successful call \$last UTC (\$(( \$(date +%s) - \$(date -d \"\${last}Z\" +%s) ))s ago), last login \${login:-not in logs}\"; done"
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "cd /opt/betfair-bot/data/logs && for f in bot acca; do [ \$f = bot ] && pat='Fetched markets ' || pat='Acca scan'; last=\$(sed -E 's/\x1b\[[0-9;]*m//g' \$f.log | grep \"\$pat\" | tail -1 | grep -oE '^[0-9T:-]+'); login=\$(cat \$(ls -rv \$f.log.* 2>/dev/null) \$f.log | sed -E 's/\x1b\[[0-9;]*m//g' | grep 'Successfully logged into Betfair' | tail -1 | grep -oE '^[0-9T:-]+'); echo \"\$f: last successful call \$last UTC (\$(( \$(date +%s) - \$(date -d \"\${last}Z\" +%s) ))s ago), last login \${login:-not in logs}\"; done"
 
 # (c) Days since last bet placed — flag if bot is up but no bets for >48h AND Nags had picks (section 3)
 ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 /tmp/bf.db \"SELECT MAX(placed_at), CAST((julianday('now') - julianday(MAX(placed_at))) AS INTEGER) AS days_ago FROM bets;\""
@@ -163,9 +163,12 @@ lists every live bet whose DB figures differ from Betfair's cleared order net of
 ```bash
 ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header /tmp/bf.db \"SELECT id, strategy, selection_name, status, placed_at FROM bets WHERE status!='SETTLED' AND placed_at < datetime('now','-1 day');\"; sqlite3 /tmp/bf.db \"SELECT strategy, COUNT(*) FROM bets WHERE result='VOID' AND placed_at > datetime('now','-14 days') GROUP BY 1;\""
 # Any catalogue call that came back full (14 Sep 2026 build) — a fetch is silently truncated
-ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "cd /opt/betfair-bot/data/logs && cat \$(ls -r bot.log.* 2>/dev/null) bot.log | sed -E 's/\x1b\[[0-9;]*m//g' | grep -c 'Market catalogue hit the result cap'"
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "cd /opt/betfair-bot/data/logs && cat \$(ls -rv bot.log.* 2>/dev/null) bot.log | sed -E 's/\x1b\[[0-9;]*m//g' | grep -c 'Market catalogue hit the result cap'"
 # LTD half-time: entries vs drops, and how many entries followed a phantom first-half reading
 ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header /tmp/bf.db \"SELECT outcome, reason, COUNT(*) n, SUM(json_extract(detail,'$.pre_ht_goal_reading') IS NOT NULL) after_phantom, SUM(ht_home=0 AND ht_away=0) ht00 FROM strategy_evaluations WHERE strategy='lay_the_draw' AND stage='halftime' AND start_time > datetime('now','-7 days') GROUP BY 1,2;\""
+# LTD near misses at the HT cap (25 Oct 2026 build): candidates 0-0 at HT that never entered because the draw sat
+# outside 1.9-3.2, with the closest price seen. A drop at 3.25 that finished non-draw is a cap cost; report, don't retune.
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header /tmp/bf.db \"SELECT date(start_time) d, event_name, reason, json_extract(detail,'$.ht_min_draw_odds') closest, json_extract(detail,'$.ht_odds_rejections') readings, ht_home||'-'||ht_away ht, ft_home||'-'||ft_away ft FROM strategy_evaluations WHERE strategy='lay_the_draw' AND stage='halftime' AND outcome<>'entered' AND json_extract(detail,'$.ht_min_draw_odds') IS NOT NULL AND start_time > datetime('now','-30 days') ORDER BY start_time;\""
 # Value betting funnel (14 Sep 2026 build): the binding filter per fixture. `no_stats` dominates by design:
 # `no_stats` is checked before `league_tier`, and only tier 1/2 leagues are loaded (LEAGUE_FILES), so League 1/2,
 # National League, cups and youth leagues all land there. Only a covered league in `no_stats` is a fault — use the
@@ -202,7 +205,7 @@ ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header /opt/betfair-
 ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header /opt/betfair-bot/data/acca.db \"SELECT date(at) d, COUNT(*) scans, MAX(markets) max_mkts, ROUND(AVG(trusted)) avg_trusted, MAX(qualified) max_qual, MAX(pool) max_pool FROM acca_scans WHERE at > datetime('now','-7 days') GROUP BY 1; SELECT date(created_at) d, status, COUNT(*) n, ROUND(AVG(n_legs),1) legs, ROUND(AVG(combined_fair_odds),2) fair, ROUND(SUM(suggested_stake),2) suggested FROM acca_accas WHERE created_at > datetime('now','-7 days') GROUP BY 1,2;\""
 
 # (d) Errors and warnings today, and its own Betfair session
-ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "cd /opt/betfair-bot/data/logs && cat \$(ls -r acca.log.* 2>/dev/null) acca.log | grep -h \"\$(date -u +%F)\" | sed -E 's/\x1b\[[0-9;]*m//g' | grep -E '\[(warning|error|critical)|Acca job failed' | cut -c1-250 | awk '{\$1=\"\"; print}' | sort | uniq -c | sort -rn | head -20; sed -E 's/\x1b\[[0-9;]*m//g' acca.log | grep -iE 'logged into Betfair|re-login|not logged in' | tail -3"
+ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "cd /opt/betfair-bot/data/logs && cat \$(ls -rv acca.log.* 2>/dev/null) acca.log | grep -h \"\$(date -u +%F)\" | sed -E 's/\x1b\[[0-9;]*m//g' | grep -E '\[(warning|error|critical)|Acca job failed' | cut -c1-250 | awk '{\$1=\"\"; print}' | sort | uniq -c | sort -rn | head -20; sed -E 's/\x1b\[[0-9;]*m//g' acca.log | grep -iE 'logged into Betfair|re-login|not logged in' | tail -3"
 
 # (e) Stuck legs: acca selections unsettled 72h+ after kick-off (Telegram should have asked for /acca_result)
 ssh -i ~/.ssh/id_ed25519_vps root@149.102.144.190 "sqlite3 -header /opt/betfair-bot/data/acca.db \"SELECT key, event_name, label, kickoff_original, kickoff, stuck_alerted_at FROM acca_selections WHERE result IS NULL AND key IN (SELECT selection_key FROM acca_legs) AND kickoff_original < datetime('now','-3 days');\""

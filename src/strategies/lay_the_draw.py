@@ -92,6 +92,13 @@ class LTDCandidate:
     # half-time entry after it shows in the funnel that the reading did not
     # stand (disallowed goal or feed glitch).
     pre_ht_goal_reading: Optional[str] = None
+    # Lowest half-time draw price rejected as outside the entry range, and how
+    # many readings were rejected. The funnel keeps only a match's latest
+    # verdict, so without these a candidate that sat a tick over the cap and
+    # was then dropped on a 47' goal (RB Leipzig v Elversberg, 24 Oct 2026:
+    # 3.25 against 3.2 for the whole interval) leaves no trace of the miss.
+    ht_min_draw_odds: Optional[float] = None
+    ht_odds_rejections: int = 0
     identified_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -501,6 +508,8 @@ class LayTheDrawStrategy(BaseStrategy):
                 score=score,
                 match_time=match_state.match_time,
                 status=match_state.status,
+                ht_min_draw_odds=candidate.ht_min_draw_odds,
+                ht_odds_rejections=candidate.ht_odds_rejections,
             )
             return None
 
@@ -519,6 +528,9 @@ class LayTheDrawStrategy(BaseStrategy):
         draw_odds = draw_runner.best_lay_price
 
         if draw_odds < MIN_HT_DRAW_ODDS or draw_odds > MAX_HT_DRAW_ODDS:
+            candidate.ht_odds_rejections += 1
+            if candidate.ht_min_draw_odds is None or draw_odds < candidate.ht_min_draw_odds:
+                candidate.ht_min_draw_odds = draw_odds
             logger.info(
                 "LTD: HT draw odds outside range",
                 market=candidate.event_name,
@@ -530,6 +542,8 @@ class LayTheDrawStrategy(BaseStrategy):
                 draw_odds=draw_odds, match_time=match_time,
                 status=match_state.status,
                 total_matched=round(market.total_matched),
+                ht_min_draw_odds=candidate.ht_min_draw_odds,
+                ht_odds_rejections=candidate.ht_odds_rejections,
             )
             return None
 
@@ -573,6 +587,7 @@ class LayTheDrawStrategy(BaseStrategy):
             total_matched=round(market.total_matched),
             favourite_odds=candidate.favourite_odds,
             pre_ht_goal_reading=candidate.pre_ht_goal_reading,
+            ht_odds_rejections=candidate.ht_odds_rejections,
         )
 
         self.log_signal(signal)

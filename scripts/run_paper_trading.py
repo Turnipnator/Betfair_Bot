@@ -525,9 +525,14 @@ class PaperTradingEngine:
         )
 
         # Schedule Betfair reconciliation (primary settlement for LIVE trading)
-        # Runs every 5 minutes - only does work in live mode
+        # then the balance sync, as one job every 5 minutes. They were two
+        # jobs (5 and 10 min); a sync that landed after Betfair paid a bet but
+        # before reconciliation booked it took Betfair's balance, and the
+        # settlement then added the same P&L again, overstating the bankroll
+        # until the next sync. Settling first means the sync never sees a
+        # payout the simulator has not booked.
         self._scheduler.add_job(
-            self.reconcile_with_betfair,
+            self.reconcile_and_sync_balance,
             IntervalTrigger(minutes=5),
             id="betfair_reconciliation",
             replace_existing=True,
@@ -552,16 +557,6 @@ class PaperTradingEngine:
             id="enrich_evaluations",
             replace_existing=True,
         )
-
-        # Schedule balance sync with Betfair (LIVE mode only)
-        # Syncs every 10 minutes to ensure bankroll matches Betfair's records
-        if settings.is_live_mode():
-            self._scheduler.add_job(
-                self.sync_balance_with_betfair,
-                IntervalTrigger(minutes=10),
-                id="balance_sync",
-                replace_existing=True,
-            )
 
         # Schedule keep-alive for Betfair session
         if betfair_client.is_logged_in:
@@ -609,13 +604,9 @@ class PaperTradingEngine:
         # Immediately settle any stale bets from previous runs
         await self.settle_stale_bets()
 
-        # Reconcile with Betfair on startup (catches bets settled since last run)
-        if settings.is_live_mode():
-            await self.reconcile_with_betfair()
-
-        # Sync balance with Betfair immediately (LIVE mode)
-        if settings.is_live_mode():
-            await self.sync_balance_with_betfair()
+        # Reconcile with Betfair on startup (catches bets settled since last
+        # run), then take Betfair's balance (LIVE mode only)
+        await self.reconcile_and_sync_balance()
 
         # Send startup notification
         if settings.telegram.is_configured():
@@ -1482,6 +1473,17 @@ class PaperTradingEngine:
                 "Failed to update HR settlement in database",
                 error=str(db_error)[:100],
             )
+
+    async def reconcile_and_sync_balance(self) -> None:
+        """Settle live bets from Betfair, then sync the bankroll to Betfair.
+
+        The order matters: Betfair's balance already includes every bet it
+        has cleared, so syncing before those bets are booked here and then
+        booking them counts their P&L twice. Both steps return immediately
+        in paper mode.
+        """
+        await self.reconcile_with_betfair()
+        await self.sync_balance_with_betfair()
 
     async def reconcile_with_betfair(self) -> None:
         """

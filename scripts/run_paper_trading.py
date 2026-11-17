@@ -69,6 +69,9 @@ from src.streaming.ltd_monitor import LTDStreamMonitor
 
 logger = get_logger(__name__)
 
+# In-play feed calls made side by side for the half-time price watch.
+HT_WATCH_FEED_CONCURRENCY = 8
+
 
 def settles_on_betfair(bet: Bet) -> bool:
     """True for a real-money bet: it carries Betfair's bet id, not a PAPER- ref.
@@ -927,6 +930,10 @@ class PaperTradingEngine:
         # Clean up expired candidates
         await ltd_strategy.cleanup_expired_candidates()
 
+        # Observation only, and before the candidate check: the price watch
+        # covers fixtures the filters rejected, so it runs with no candidates.
+        await self._observe_ht_prices(ltd_strategy)
+
         candidates = ltd_strategy.get_candidates()
         if not candidates:
             return
@@ -947,6 +954,44 @@ class PaperTradingEngine:
             signal = await ltd_strategy.evaluate_halftime(market)
             if signal:
                 await self.process_signal(signal)
+
+    async def _observe_ht_prices(self, ltd_strategy) -> None:
+        """
+        Record the 0-0 draw price of watched fixtures around half-time.
+
+        Places nothing. A failure here must never reach the entry path that
+        runs after it, so everything is caught.
+        """
+        try:
+            due = ltd_strategy.ht_price_watch_due()
+            if not due or not betfair_client.is_logged_in:
+                return
+
+            # One in-play feed call per fixture; a Saturday 3pm kick-off puts
+            # dozens in the window at once, so fetch them side by side.
+            limiter = asyncio.Semaphore(HT_WATCH_FEED_CONCURRENCY)
+
+            async def fetch_state(event_id: int):
+                async with limiter:
+                    return await betfair_client.get_match_state(event_id)
+
+            watches = list(due.values())
+            states = await asyncio.gather(
+                *(fetch_state(w.event_id) for w in watches), return_exceptions=True
+            )
+            markets = await betfair_client.get_market_prices([w.market_id for w in watches])
+
+            recorded = 0
+            for watch, state in zip(watches, states):
+                market = markets.get(watch.market_id)
+                if market is None or isinstance(state, BaseException):
+                    continue
+                if await ltd_strategy.observe_halftime_price(market, state):
+                    recorded += 1
+            if recorded:
+                logger.info("Half-time draw prices recorded", rows=recorded, watched=len(watches))
+        except Exception as e:
+            logger.warning("Half-time price watch failed", error=str(e)[:200])
 
     async def _observe_tennis_markets(self, markets: list) -> None:
         """

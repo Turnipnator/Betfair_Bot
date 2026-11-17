@@ -105,9 +105,19 @@ HORSE_RACING_STRATEGIES: frozenset[str] = frozenset({
 # own PLACE market-type gate), so nags_back going paper does not affect it.
 #
 # nags_lay_fav stays paper (no evidence base).
+#
+# lay_the_draw moved to PAPER 2026-11-17. It is a football strategy; it is
+# listed here because this set is the one live/paper gate for every strategy.
+# Eleven seasons of football-data.co.uk (1,329 games passing the LTD filters
+# and 0-0 at half-time) finished drawn 37.4% of the time, exactly what the
+# closing odds imply (37.3%): the filters select nothing the market has not
+# priced, so the lay is a fair bet less commission. Live since Sep: 29 bets,
+# 19 won, -£25.02. Back to live only on evidence from the `ht_price` funnel
+# rows that the price paid beats the draw rate. See research_notes.md.
 FORCE_PAPER_STRATEGIES: frozenset[str] = frozenset({
     "nags_lay_fav",
     "nags_back",
+    "lay_the_draw",
 })
 
 # nags_lay_fav (B1a) filters.

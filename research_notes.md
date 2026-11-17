@@ -357,3 +357,95 @@ pre-off CLV rule with startup purge. Deploy = scp `src config scripts tests`
 - Is the European-vs-domestic split real? Needs ~50 more domestic v2 bets or the funnel table.
 - What does Paul's BTTS success look like in numbers?
 - Is exchange BTTS liquid enough outside the Big 5?
+
+---
+
+## 17 Nov 2026 — Is LTD selection anything more than odds? (Paul: "seems like pot luck")
+
+**Question.** What does LTD actually select on, and do the entered matches draw less often than the price implies?
+
+**What the code selects on** (`src/strategies/lay_the_draw.py`, HIGH): tier 1/2 league; blended home-scored avg ≥ 1.5, home-conceded ≤ 1.25, away-scored ≥ 0.9; pre-match draw 3.0–5.0; favourite ≤ 2.0; £15k matched; then 0-0 at HT with draw 1.9–3.2. No head-to-head, no league position, no form, no first-half shots/xG. UEFA ties skip the stats block entirely — odds and liquidity only.
+
+**Hypotheses.** H1 filters pick matches that draw less than the HT price implies (edge). H2 entered matches draw at the market rate (no edge; results are variance). H3 edge exists only in a subset (European vs domestic).
+
+**Evidence (VPS DB, live bets + funnel since 2 Sep).**
+- 29 decided live bets 5 Sep–15 Nov: 19 W / 10 L, −£25.02. Sep −£29.14 (9), Oct +£86.44 (13, 12 W), Nov −£82.32 (7, 2 W).
+- Typical bet: win ~£9.80, lose ~£21 at 3.1–3.2 → break-even ≈ 68% wins; actual 65.5%.
+- 32 entries with an FT score: 10 draws (31%), 6 of them 0-0. A 3.1 lay price implies ~32%. H2 fits (MEDIUM; n=32, 95% CI roughly 16–50%).
+- Split: European (stats bypassed) 18 bets, 13 W, ≈ +£16. Domestic (stats-filtered) 11 bets, 6 W, ≈ −£41. Opposite of what H1 predicts; same direction as the 2 Sep note. LOW (n=11).
+- Funnel, fixtures 0-0 at HT, share that finished drawn: stored candidates 9/36 (25%); no_stats 187/507 (37%); home_goals 49/132 (37%); no_clear_favourite 11/34 (32%); home_conceded 11/37 (30%). Filters point the right way pre-match (LOW-MEDIUM), but rejected fixtures would also have had shorter HT draw prices, so this is not evidence of edge at the price.
+
+**Self-critique.** Oct (12/13) and Nov (2/7) are both inside what a ~68% coin produces over 29 bets; neither month says much. Candidate count (36 HT 0-0) and entry count (32) come from different queries and ht_* is null on some rows — not reconciled.
+
+**Conclusion.** H2 most supported: since the Sep cap change the entries draw at about the rate the price implies, so P&L is variance minus commission. H1 not supported, not ruled out. H3 unresolved.
+
+**Open / next.** (a) Lifetime v2 draw rate vs implied at entry price, all bets since 7 Mar. (b) Whether a first-half activity signal (shots, shots on target) separates the 0-0 HT games that stay 0-0 — 6 of 10 losing draws finished 0-0; needs a data source. (c) The 3.2 cap raised liability from ~£17.50 to ~£22 per £10; check whether whistle entries at 3.0–3.2 beat the old 2.7–2.8 second-half entries.
+
+### 17 Nov 2026 (later) — live source for first-half shots
+
+**Need.** Shots / shots on target at half-time for an LTD candidate (≈2 a day, 10–15 on a busy Saturday), covering tier 1/2 domestic + UEFA, plus historical first-half splits to test the signal before using it.
+
+**Already have.** Betfair in-play feed (`MatchState`): clock, score, status only — no shots (HIGH, code). football-data.co.uk files: full-match HS/HST only, no half split.
+
+**Candidates.**
+- **API-Football (api-sports.io)** — `fixtures/statistics` returns Shots on Goal / Total Shots / inside-box etc.; a `half` parameter (release note, ~late 2024) adds half-time stats. Free 100 req/day; Pro $19/mo 7,500/day (RapidAPI listing). All plans include all competitions/endpoints. Vendor claims 15s live updates. MEDIUM: docs and pricing pages return 403 to automated fetch, so exact `half` syntax, the first season with half data, and free-plan season limits are UNVERIFIED — check with a free key.
+- **TheStatsAPI** — `/matches/{id}/live-stats` (total_shots, shots_on_target, expected_goals; 30s cache; poll) and post-match `/stats` split all/first_half/second_half. 150 competitions by default; Big 5 + UCL from 2020/21 confirmed, UEL/UECL/second tiers NOT confirmed. Price not found. MEDIUM-LOW.
+- **Sportmonks** — live stats incl. shots on target; from €29/mo, 14-day trial; period split and which tier carries live stats not confirmed. LOW.
+- Sportradar / Opta / IMG — enterprise pricing, ruled out for a £180 bank.
+- **Understat** (already scraped for xG) — shot-by-shot with minute, Big 5, free. Not live, but enough to backtest "first-half shots vs FT draw among 0-0-at-HT games" at zero cost.
+
+**Recommendation.** API-Football, free key first. Order: (1) Understat backtest on Big 5, several seasons — does first-half shot count separate 0-0-HT games that stay drawn? If no signal, stop, spend nothing. (2) If yes, free API-Football key: confirm `half` works, live stats are populated at the whistle for UEL/UECL and second tiers, map fixtures to Betfair events. (3) Record first-half shots on the `ht_entry` funnel row for a few weeks before it gates any bet.
+
+**Risks.** A third name-matching layer (API-Football team names vs Betfair). Live stat lag in smaller leagues unknown. Backtest on Big 5 may not transfer to UEFA ties, which are 18 of the last 29 bets.
+
+### 17 Nov 2026 (later still) — backtest: do first-half shots separate 0-0-HT games that stay drawn?
+
+**Data actually used.** Understat was serving "We will come back soon" on every URL (this machine and an outside fetch), so the test ran on StatsBomb open data instead: 2015/16, the four leagues published in full (EPL, La Liga, Serie A, Ligue 1; Bundesliga has 34 of 306 so excluded), joined to football-data.co.uk for HT score and closing prices. 1,517 matches, all joined, 486 were 0-0 at HT, zero HT-score disagreements between sources. Script: `scripts/research/ltd_first_half_shots.py <cache_dir>` (cuts fixed before running: 3 measures × terciles × 2 populations).
+
+**Result — all 486 games.** Drawn 38.3% (CI 34–43%), 0-0 FT 25.1%. Draw rate by tercile: total shots 38.9 / 38.9 / 37.0; shots on target 40.1 / 37.0 / 37.7; xG 39.5 / 41.4 / 34.0. Correlations −0.03, 0.00, −0.04; p 0.53, 0.93, 0.41. No signal (HIGH for this season).
+
+**Result — candidate profile (closing favourite ≤ 2.0, draw 3.0–5.0), 199 games.** Drawn 39.2% (CI 33–46%), 0-0 FT 29.1%. By tercile: total shots 42.4 / 44.8 / 30.3; shots on target 42.4 / 41.8 / 33.3; xG 47.0 / 37.3 / 33.3. Direction is as hoped (busy first halves draw less) but p = 0.24, 0.63, 0.57 and every interval overlaps. Not established (LOW).
+
+**Self-critique.** One season, ten years old. 66 games per tercile cannot detect a difference smaller than ~15 points. Six cuts were looked at, so one "best" tercile is expected by chance. The profile here omits LTD's goals filters. No HT prices, so even a real effect may already be in the half-time draw price — the in-play market sees the shots too.
+
+**Side finding worth more than the shots result.** 0-0-at-HT games in the candidate profile finished drawn 39% of the time. LTD breaks even at ~32% when laying at 3.1. Even the best tercile (30–33%) only reaches break-even. Fits the live record (31% drawn, small loss). Not conclusive — goals filters not applied, one season — but it points at the price/base rate, not at missing match information. MEDIUM-LOW.
+
+**Conclusion.** Do not pay for a live shots feed on this evidence. H "shots separate the stayers" not supported; not ruled out for the candidate subset.
+
+**Next.** (a) Re-run on Understat (2014/15 onward, ~10 seasons, ~2,000 candidate-profile games) when it is back; that sample can settle a 5-point effect. (b) Check the base rate directly: draw rate of 0-0-HT games matching the full LTD filters across several seasons of football-data.co.uk (has HT scores and odds, no shots needed) against the 32% break-even. (b) is the more important question and needs no new data source.
+
+### 17 Nov 2026 (base rate) — how often do LTD's 0-0-HT candidates finish drawn?
+
+**Method.** `scripts/research/ltd_base_rate.py <cache_dir>`. football-data.co.uk, 14 tier-1/2 divisions with HT scores, 2015/16–2026/27 to date (2014/15 as prior only), 55,080 games with odds. Pre-match filters replayed with only results known before each kick-off, same season blend as the bot; closing Pinnacle odds stand in for the exchange. Not replayed: £15k liquidity, UEFA ties, Denmark. No historical HT prices, so a Poisson pair fitted to closing 1X2 odds × second-half goal share (0.559) gives an odds-implied P(draw | 0-0 HT).
+
+**Break-even draw rate (2% commission).** Lay 2.8 → 35.3%; 3.0 → 32.9%; 3.1 → 31.8%; 3.2 → 30.8%.
+
+**Result (0-0 at HT).**
+| Population | n | Drawn | 95% CI | Odds-implied |
+|---|---|---|---|---|
+| A all games | 16,894 | 38.5% | 37.8–39.3 | 40.0% |
+| B odds profile only | 5,853 | 36.4% | 35.2–37.6 | 38.2% |
+| C full LTD filter | 1,329 | 37.4% | 34.8–40.0 | 37.3% |
+| B failing the goals filters | 4,524 | 36.1% | 34.7–37.5 | 38.4% |
+
+- C is 37.4% against a 31.8% break-even at 3.1; the whole CI is above break-even even at 3.0. To break even at 37.4% the lay must be ≤ ~2.62. (HIGH for the rate; the price it is compared with is the bot's own fills, avg 3.04, ~3.1 since 12 Sep.)
+- C actual = odds-implied (37.4 vs 37.3): the filters find nothing the closing odds do not already say. The goals filters add nothing over the odds profile (37.4 vs 36.1 for games that fail them). (HIGH)
+- By season C ranges 30.5–44.7%; no season's CI excludes 37%. Tier 1 35.9%, tier 2 39.3%.
+- By favourite price: 1.4–1.6 → 30.4% (n=372, CI 25.9–35.2, implied 34.4); 1.6–1.8 → 37.4%; 1.8–2.0 → 42.0% (n=459, CI 37.6–46.6). The 1.8–2.0 band is the one the 29 Apr loosening (1.9 → 2.0) added to. The 1.4–1.6 result is one of four post-hoc bands — LOW until seen out of sample.
+- Expected P&L per £10 lay at 3.1 with a 37.4% draw rate: 0.626 × 9.80 − 0.374 × 21 = −£1.72.
+
+**Unresolved.** The bot's 34 real HT fills average 3.04; the odds-implied price for the same pre-match odds averages 2.82 (ratio 1.08, and fills are censored at the 3.2 cap so the true gap is larger). Either (i) the real HT market prices the draw ~8% longer than history says is fair — then laying there is clearly losing and the draw is the value side, which is hard to believe of a liquid market; or (ii) the stand-in is off for the games the bot actually enters (half are UEFA ties, all pass a liquidity floor, 2026 stoppage time). Live record 10/32 drawn (31%, CI ~18–49%) cannot tell 33% from 37%. Simulated P&L at 1.08× (−£0.94/bet) assumes (i) and should not be quoted as a forecast.
+
+**Conclusion.** No evidence of an LTD edge at half-time. Best case (market fair) the strategy pays commission, ~−£0.20 per bet; if history holds at the prices actually paid, ~−£1.70 per bet. The selection filters are not what would rescue it.
+
+**Next.** (a) Decision for Paul: LTD to paper. (b) Settle (i) vs (ii) cheaply: record the half-time draw price for every tier-1/2 game that is 0-0 at the whistle (not only candidates) alongside its pre-match odds; ~4 weeks gives a few hundred real HT prices to compare with the 37% base rate. (c) If anything is pursued, the 1.4–1.6 favourite band, paper only, judged on new data.
+
+### 17 Nov 2026 (correction) — the price gap is the entry minute, not a mispriced market
+
+While adding the price recorder: the in-play feed's statuses are `KickOff` / `FirstHalfEnd` / `SecondHalfKickOff`; `"HalfTime"` is never sent, so `evaluate_halftime`'s 40–65' window is what admits an entry. Funnel: 24 of 34 entries had status `KickOff` at 40–45' (12 at exactly 40'), 5 in the interval, 1 in the second half, 4 unknown (HIGH, DB).
+
+Re-pricing the 34 entries for the 40th minute (remaining-goal share ≈ 0.625 rather than the second half's 0.559): implied avg 3.05 vs matched 3.04, ratio 0.999. So the "unresolved" 8% gap above is explained by (ii): the fills were fair for when they were struck. **The −£1.72-per-bet figure above compared a 40th-minute price with a half-time draw rate and should be disregarded.** The supported expectation is a fair bet less commission, about −£0.20 per £10 lay (MEDIUM: Poisson stand-in, 34 fills).
+
+Unchanged: the filters select nothing the closing odds do not already price (37.4% vs 37.3%, n=1,329), and no edge is shown. LTD moved to paper the same day; `ht_price` funnel rows now record the real draw price at 40' and in the interval for every tier 1/2 + UEFA game, with FT score, so the question can be settled on exchange prices in ~4 weeks.
+
+Open: `MatchState.is_half_time` treats the whole second half as half-time and never matches the interval; funnel `ht_*` scores can therefore include a goal just after the restart. Not fixed (LTD on paper; changing it alters entry timing).

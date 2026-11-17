@@ -63,6 +63,25 @@ MIN_MARKET_LIQUIDITY = 15_000  # £15k
 # relegated side (no prior season in its new division) until late September.
 MIN_TEAM_HOME_AWAY_GAMES = 3
 
+# Half-time price watch (17 Nov 2026). Observation only: it places nothing.
+# The base-rate test could say how often a 0-0 game finishes drawn but not
+# what the exchange charges to lay it, because no history of in-play prices
+# exists. So for every tier 1/2 and UEFA fixture, candidate or not, the draw
+# price is recorded twice while the score is 0-0: at the first reading from
+# the 40th minute (where the strategy has in practice been entering) and in
+# the interval. The full-time score is filled in by the funnel's score poll.
+#
+# A fixture is polled only inside this wall-clock window after kick-off:
+# minute 40 cannot come sooner, and the interval is over by the end of it.
+HT_WATCH_FROM_MINUTES = 39
+HT_WATCH_TO_MINUTES = 78
+HT_WATCH_FIRST_MINUTE = 40
+# What the in-play feed reports during the interval. "HalfTime" is what the
+# code was written against; the feed has only ever sent "FirstHalfEnd".
+HT_INTERVAL_STATUSES = ("FirstHalfEnd", "HalfTime")
+SECOND_HALF_STATUS = "SecondHalfKickOff"
+UEFA_WATCH_LEAGUE = "UEFA"
+
 
 class LTDState(str, Enum):
     """Lay the Draw position states."""
@@ -100,6 +119,27 @@ class LTDCandidate:
     ht_min_draw_odds: Optional[float] = None
     ht_odds_rejections: int = 0
     identified_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+@dataclass
+class HTPriceWatch:
+    """A fixture whose 0-0 draw price is to be recorded around half-time."""
+    market_id: str
+    event_name: str
+    event_id: int
+    start_time: datetime
+    league: str  # football-data code, or "UEFA"
+    european: bool
+    competition: Optional[str] = None
+    market_name: Optional[str] = None
+    # Last prices seen before kick-off (refreshed on every pre-match scan).
+    pre_home_back: Optional[float] = None
+    pre_draw_back: Optional[float] = None
+    pre_draw_lay: Optional[float] = None
+    pre_away_back: Optional[float] = None
+    pre_total_matched: float = 0.0
+    # The 40th-minute snapshot, kept so the interval row carries both.
+    min40: Optional[dict] = None
 
 
 @dataclass
@@ -182,6 +222,9 @@ class LayTheDrawStrategy(BaseStrategy):
         # Track candidates waiting for half-time 0-0 entry
         self._candidates: dict[str, LTDCandidate] = {}
 
+        # Fixtures whose 0-0 draw price is recorded around half-time
+        self._ht_watch: dict[str, HTPriceWatch] = {}
+
     async def evaluate(self, market: Market) -> Optional[BetSignal]:
         """
         Evaluate market for LTD candidacy (pre-match).
@@ -204,6 +247,11 @@ class LayTheDrawStrategy(BaseStrategy):
 
         if not self.pre_evaluate(market):
             return None
+
+        # Before the candidate check: a stored candidate's pre-match prices
+        # should keep refreshing up to the off like any other fixture's.
+        if not market.in_play:
+            await self._watch_ht_price(market)
 
         # Skip if already a candidate or has a position
         if market.market_id in self._candidates:
@@ -608,6 +656,169 @@ class LayTheDrawStrategy(BaseStrategy):
             or match_state.is_finished
             or match_state.match_time > 45
         )
+
+    async def _watch_ht_price(self, market: Market) -> None:
+        """
+        Put a tier 1/2 or UEFA fixture on the half-time price watch and
+        refresh its pre-match prices.
+
+        Independent of the LTD verdict: the point is to price every 0-0
+        half-time game, not only the ones the filters like.
+        """
+        if not market.event_id or not market.event_name or " v " not in market.event_name:
+            return
+        if any(x in market.event_name for x in ["U21", "U23", "(Res)", "Reserve", "Youth"]):
+            return
+
+        watch = self._ht_watch.get(market.market_id)
+        if watch is None:
+            competition_lower = (market.competition or "").lower()
+            european = any(comp in competition_lower for comp in EUROPEAN_COMPETITIONS)
+            league = UEFA_WATCH_LEAGUE
+            if not european:
+                home_team, away_team = (p.strip() for p in market.event_name.split(" v ", 1))
+                match_stats = await football_data_service.get_match_stats(home_team, away_team)
+                if not match_stats:
+                    return
+                league = match_stats[2].league_code
+                if LEAGUE_TIERS.get(league, 99) > MAX_LEAGUE_TIER:
+                    return
+            watch = HTPriceWatch(
+                market_id=market.market_id,
+                event_name=market.event_name,
+                event_id=market.event_id,
+                start_time=market.start_time,
+                league=league,
+                european=european,
+                competition=market.competition,
+                market_name=market.market_name,
+            )
+            self._ht_watch[market.market_id] = watch
+
+        draw = self._find_draw_runner(market)
+        sides = [r for r in market.runners if r is not draw]
+        if draw is None or len(sides) != 2:
+            return
+        # Betfair lists the home side first; the event name settles it if not.
+        home, away = sides
+        if away.name and market.event_name.startswith(away.name):
+            home, away = away, home
+        watch.start_time = market.start_time
+        watch.pre_home_back = home.best_back_price
+        watch.pre_away_back = away.best_back_price
+        watch.pre_draw_back = draw.best_back_price
+        watch.pre_draw_lay = draw.best_lay_price
+        watch.pre_total_matched = market.total_matched
+
+    def ht_price_watch_due(self, now: Optional[datetime] = None) -> dict[str, HTPriceWatch]:
+        """
+        Watched fixtures inside the window half-time falls in.
+
+        Fixtures past the window are forgotten here, so the watch list holds
+        only matches that have not reached their second half.
+        """
+        now = now or datetime.now(timezone.utc)
+        due: dict[str, HTPriceWatch] = {}
+        for market_id, watch in list(self._ht_watch.items()):
+            start = watch.start_time
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=timezone.utc)
+            elapsed = (now - start).total_seconds() / 60
+            if elapsed > HT_WATCH_TO_MINUTES:
+                del self._ht_watch[market_id]
+            elif elapsed >= HT_WATCH_FROM_MINUTES:
+                due[market_id] = watch
+        return due
+
+    async def observe_halftime_price(
+        self, market: Market, match_state: Optional[MatchState]
+    ) -> Optional[str]:
+        """
+        Record the draw price of a watched fixture while it is 0-0.
+
+        Writes one funnel row per fixture (stage ``ht_price``): reason
+        ``min40`` at the first reading from the 40th minute, replaced by
+        ``ht_0_0`` (carrying both snapshots) if it is still 0-0 in the
+        interval. A ``min40`` row that never becomes ``ht_0_0`` is a game
+        that scored before the whistle or whose interval was missed.
+
+        Never places a bet.
+
+        Returns:
+            The reason recorded on this call, or None if nothing was written.
+        """
+        watch = self._ht_watch.get(market.market_id)
+        if watch is None or match_state is None:
+            return None
+
+        in_interval = match_state.status in HT_INTERVAL_STATUSES
+        second_half = match_state.status == SECOND_HALF_STATUS or match_state.is_finished
+
+        if match_state.home_score != 0 or match_state.away_score != 0:
+            # Same rule as the entry path: a first-half reading can be a
+            # disallowed goal, so it only ends the watch once it is final.
+            if in_interval or second_half or match_state.match_time > 45:
+                del self._ht_watch[market.market_id]
+            return None
+
+        if second_half:
+            # The interval came and went between scans; a second-half price
+            # is a different thing and is not recorded as half-time.
+            del self._ht_watch[market.market_id]
+            return None
+
+        if not in_interval and (
+            watch.min40 is not None or match_state.match_time < HT_WATCH_FIRST_MINUTE
+        ):
+            return None
+
+        draw = self._find_draw_runner(market)
+        if draw is None or not draw.best_back_price or not draw.best_lay_price:
+            # Suspended or one-sided book: try again on the next scan.
+            return None
+
+        snapshot = {
+            "draw_back": draw.best_back_price,
+            "draw_lay": draw.best_lay_price,
+            "draw_ltp": draw.last_price_traded,
+            "total_matched": round(market.total_matched),
+            "match_time": match_state.match_time,
+        }
+        if in_interval:
+            reason = "ht_0_0"
+            del self._ht_watch[market.market_id]
+        else:
+            reason = "min40"
+            watch.min40 = snapshot
+
+        detail = {
+            "league": watch.league,
+            "european": watch.european,
+            "status": match_state.status,
+            "pre_home_back": watch.pre_home_back,
+            "pre_draw_back": watch.pre_draw_back,
+            "pre_draw_lay": watch.pre_draw_lay,
+            "pre_away_back": watch.pre_away_back,
+            "pre_total_matched": round(watch.pre_total_matched),
+        }
+        for prefix, snap in (("m40", watch.min40), ("ht", snapshot if in_interval else None)):
+            if snap:
+                detail.update({f"{prefix}_{key}": value for key, value in snap.items()})
+
+        await self.record_evaluation(
+            Market(
+                market_id=watch.market_id,
+                market_name=watch.market_name or "Match Odds",
+                event_name=watch.event_name,
+                sport=Sport.FOOTBALL,
+                market_type="MATCH_ODDS",
+                start_time=watch.start_time,
+                competition=watch.competition,
+                event_id=watch.event_id,
+            ),
+            "ht_price", "observed", reason, **detail,
+        )
+        return reason
 
     def get_candidates(self) -> dict[str, LTDCandidate]:
         """Get current candidates waiting for HT entry."""

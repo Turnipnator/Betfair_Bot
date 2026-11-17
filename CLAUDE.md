@@ -383,6 +383,54 @@ only a `goal_before_ht` row. The candidate now carries `ht_min_draw_odds`
 `ht_odds_range`, `goal_before_ht` and `ht_entry` rows, so the cost of the cap
 is a query (healthcheck section 8). `tests/test_ltd_funnel.py`.
 
+### LTD is on paper, and every 0-0 half-time price is recorded (17 Nov 2026)
+
+`lay_the_draw` is in `FORCE_PAPER_STRATEGIES` (the one live/paper gate, in
+`src/strategies/horse_racing.py` for historical reasons). Live from Sep it
+went 19 from 29 for -£25.02. `scripts/research/ltd_base_rate.py` replayed the
+pre-match filters over eleven seasons of football-data.co.uk: 1,329 games
+passed them and were 0-0 at half-time, and 37.4% finished drawn against the
+37.3% their closing odds imply. The filters select nothing the market has not
+priced, and the goals filters add nothing over the odds filters (games that
+fail them drew 36.1%). First-half shots did not separate the games that stay
+drawn either (`ltd_first_half_shots.py`, StatsBomb 2015/16, p > 0.2 on every
+cut). Break-even draw rate at 2% commission: 35.3% laying at 2.8, 31.8% at
+3.1, 30.8% at 3.2.
+
+**The entry is from the 40th minute, not the whistle.** The in-play feed's
+statuses are `KickOff` (the whole first half), `FirstHalfEnd` (the interval)
+and `SecondHalfKickOff`; `"HalfTime"`, which `evaluate_halftime` and
+`MatchState.is_half_time` test for, has never been sent. So the 40-65 minute
+window is what admits an entry, and 24 of the 34 funnel entries were made
+with status `KickOff` at 40-45', 12 of them at exactly 40'. That is why the
+fills (avg 3.04) sit above a fair price worked out for the interval (2.82):
+priced for the 40th minute the same model gives 3.05. Left as it is while on
+paper; `is_half_time` also counts the whole second half as half-time, so the
+funnel's `ht_*` score can pick up a goal scored just after the restart.
+
+**The price watch** places nothing. `_watch_ht_price` puts every tier 1/2 and
+UEFA fixture on a watch list at the pre-match scan, whatever LTD's verdict,
+and `_observe_ht_prices` (engine, each scan, before the candidate check)
+writes one `strategy_evaluations` row per fixture at stage `ht_price`:
+reason `min40` at the first 0-0 reading from the 40th minute, replaced by
+`ht_0_0` if it is still 0-0 in the interval. Detail carries `pre_*`
+(last pre-match home/draw/away prices), `m40_*` and `ht_*` (draw back, lay,
+last traded, matched volume, minute). A second-half price is never stored as
+half-time, and a first-half goal reading is held, not trusted, as on the
+entry path. The score poll fills `ft_*`, so "what does the exchange charge
+for a 0-0 game, and how often does it finish drawn" becomes a query:
+
+```sql
+SELECT reason, COUNT(*) n, SUM(ft_home = ft_away) drawn,
+       ROUND(AVG(json_extract(detail,'$.m40_draw_lay')),2) lay_40,
+       ROUND(AVG(json_extract(detail,'$.ht_draw_lay')),2) lay_ht
+FROM strategy_evaluations
+WHERE strategy='lay_the_draw' AND stage='ht_price' AND ft_home IS NOT NULL GROUP BY 1;
+```
+
+A relight needs that table to show a price that beats the draw rate after
+commission. `tests/test_ht_price_watch.py`.
+
 ### UEFA markets are fetched by competition id (14 Sep 2026)
 
 A European tie is in whichever country hosts it, so the second football fetch

@@ -73,7 +73,9 @@ def stats():
     return (home, away, league)
 
 
-def ht_state(home=0, away=0, status="HalfTime", minute=45):
+# Statuses are the ones the in-play feed sends: KickOff (first half),
+# FirstHalfEnd (the interval), SecondHalfKickOff.
+def ht_state(home=0, away=0, status="FirstHalfEnd", minute=45):
     return MatchState(event_id=99, match_time=minute, home_score=home, away_score=away, status=status)
 
 
@@ -140,7 +142,7 @@ async def run():
         print("goal reading before the whistle")
         await s.evaluate(make_market(market_id="1.4"))
         with patch.object(ltd_module.betfair_client, "get_match_state",
-                          new=AsyncMock(return_value=ht_state(home=1, status="InProgress", minute=30))):
+                          new=AsyncMock(return_value=ht_state(home=1, status="KickOff", minute=30))):
             records.clear()
             sig = await s.evaluate_halftime(make_market(market_id="1.4", draw_lay=2.4, in_play=True))
             check("first-half goal reading: no signal", sig, None)
@@ -149,9 +151,9 @@ async def run():
             check("first-half goal reading: remembered on the candidate",
                   s.get_candidates()["1.4"].pre_ht_goal_reading, "1-0 at 30'")
         with patch.object(ltd_module.betfair_client, "get_match_state",
-                          new=AsyncMock(return_value=ht_state(home=1, status="InProgress", minute=45))):
+                          new=AsyncMock(return_value=ht_state(home=1, status="KickOff", minute=47))):
             await s.evaluate_halftime(make_market(market_id="1.4", draw_lay=2.4, in_play=True))
-            check("45' InProgress (stoppage time) reading: still held", "1.4" in s.get_candidates(), True)
+            check("47' of first-half stoppage time: reading still held", "1.4" in s.get_candidates(), True)
         with patch.object(ltd_module.betfair_client, "get_match_state", new=AsyncMock(return_value=ht_state())):
             records.clear()
             sig = await s.evaluate_halftime(make_market(market_id="1.4", draw_lay=2.4, in_play=True))
@@ -161,21 +163,21 @@ async def run():
 
         await s.evaluate(make_market(market_id="1.41"))
         with patch.object(ltd_module.betfair_client, "get_match_state",
-                          new=AsyncMock(return_value=ht_state(home=1, status="HalfTime", minute=45))):
+                          new=AsyncMock(return_value=ht_state(home=1, minute=45))):
             records.clear()
             sig = await s.evaluate_halftime(make_market(market_id="1.41", draw_lay=2.4, in_play=True))
-            check("1-0 at HalfTime: no signal", sig, None)
-            check("1-0 at HalfTime: dropped", (last()["outcome"], last()["reason"]), ("dropped", "goal_before_ht"))
-            check("1-0 at HalfTime: score and status kept",
-                  (last()["detail"]["score"], last()["detail"]["status"]), ("1-0", "HalfTime"))
-            check("1-0 at HalfTime: candidate removed", "1.41" in s.get_candidates(), False)
+            check("1-0 in the interval: no signal", sig, None)
+            check("1-0 in the interval: dropped", (last()["outcome"], last()["reason"]), ("dropped", "goal_before_ht"))
+            check("1-0 in the interval: score and status kept",
+                  (last()["detail"]["score"], last()["detail"]["status"]), ("1-0", "FirstHalfEnd"))
+            check("1-0 in the interval: candidate removed", "1.41" in s.get_candidates(), False)
 
         await s.evaluate(make_market(market_id="1.42"))
         with patch.object(ltd_module.betfair_client, "get_match_state",
-                          new=AsyncMock(return_value=ht_state(away=1, status="InProgress", minute=52))):
+                          new=AsyncMock(return_value=ht_state(away=1, status="SecondHalfKickOff", minute=52))):
             records.clear()
             await s.evaluate_halftime(make_market(market_id="1.42", draw_lay=2.4, in_play=True))
-            check("0-1 at 52' (HalfTime status missed): dropped",
+            check("0-1 at 52' (interval missed): dropped",
                   (last()["outcome"], last()["reason"]), ("dropped", "goal_before_ht"))
             check("0-1 at 52': candidate removed", "1.42" in s.get_candidates(), False)
 
@@ -185,7 +187,7 @@ async def run():
             sig = await s.evaluate_halftime(make_market(market_id="1.5", draw_lay=3.4, in_play=True))
             check("HT odds out of range: no signal", sig, None)
             check("HT odds out of range: recorded", last()["reason"], "ht_odds_range")
-            check("HT odds out of range: status kept", last()["detail"]["status"], "HalfTime")
+            check("HT odds out of range: status kept", last()["detail"]["status"], "FirstHalfEnd")
             check("HT odds out of range: candidate kept", "1.5" in s.get_candidates(), True)
             await s.evaluate_halftime(make_market(market_id="1.5", draw_lay=3.25, in_play=True))
             check("closest rejected price carried on the row", last()["detail"]["ht_min_draw_odds"], 3.25)
@@ -196,7 +198,7 @@ async def run():
         # goal. The drop row overwrites the ht_odds_range row, so it must carry
         # the near miss itself.
         with patch.object(ltd_module.betfair_client, "get_match_state",
-                          new=AsyncMock(return_value=ht_state(home=1, status="InProgress", minute=47))):
+                          new=AsyncMock(return_value=ht_state(home=1, status="SecondHalfKickOff", minute=47))):
             records.clear()
             await s.evaluate_halftime(make_market(market_id="1.5", draw_lay=4.0, in_play=True))
             check("goal after a cap miss: dropped", (last()["outcome"], last()["reason"]), ("dropped", "goal_before_ht"))
@@ -205,7 +207,7 @@ async def run():
 
         # Cap raised 2.8 -> 3.2 on 12 Sep 2026: a 0-0 HT draw for this profile
         # trades ~2.9-3.2 at the whistle, and the old cap made the bot wait into
-        # the second half. 3.0 at HalfTime must now enter, and say it did so at HT.
+        # the second half. 3.0 in the interval must now enter, and say it did so at HT.
         print("half-time cap")
         check("cap is 3.2", ltd_module.MAX_HT_DRAW_ODDS, 3.2)
         await s.evaluate(make_market(market_id="1.55"))
@@ -214,16 +216,53 @@ async def run():
             sig = await s.evaluate_halftime(make_market(market_id="1.55", draw_lay=3.0, in_play=True))
             check("3.0 at the whistle: signal", sig is not None and sig.odds == 3.0, True)
             check("3.0 at the whistle: entered", (last()["outcome"], last()["reason"]), ("entered", "ht_entry"))
-            check("3.0 at the whistle: status recorded", last()["detail"]["status"], "HalfTime")
+            check("3.0 at the whistle: status recorded", last()["detail"]["status"], "FirstHalfEnd")
             check("clean entry: no phantom reading on the row", last()["detail"]["pre_ht_goal_reading"], None)
             check("clean entry at the whistle: no rejected readings", last()["detail"]["ht_odds_rejections"], 0)
         await s.evaluate(make_market(market_id="1.56"))
         with patch.object(ltd_module.betfair_client, "get_match_state",
-                          new=AsyncMock(return_value=ht_state(status="InProgress", minute=52))):
+                          new=AsyncMock(return_value=ht_state(status="SecondHalfKickOff", minute=52))):
             records.clear()
             sig = await s.evaluate_halftime(make_market(market_id="1.56", draw_lay=2.78, in_play=True))
-            check("second-half entry still allowed inside 40-65'", sig is not None, True)
-            check("second-half entry: status says so", last()["detail"]["status"], "InProgress")
+            check("second-half entry still allowed up to 65'", sig is not None, True)
+            check("second-half entry: status says so", last()["detail"]["status"], "SecondHalfKickOff")
+
+        # The feed never sends "HalfTime", so until 17 Nov 2026 the 40-65'
+        # clock window admitted the bet from the 40th minute of the first
+        # half: 24 of 34 entries were made with status KickOff.
+        print("no entry before the whistle")
+        await s.evaluate(make_market(market_id="1.57"))
+        for minute in (41, 45, 48):
+            with patch.object(ltd_module.betfair_client, "get_match_state",
+                              new=AsyncMock(return_value=ht_state(status="KickOff", minute=minute))):
+                records.clear()
+                sig = await s.evaluate_halftime(make_market(market_id="1.57", draw_lay=3.0, in_play=True))
+                check(f"0-0 at {minute}' of the first half: no signal", sig, None)
+                check(f"0-0 at {minute}' of the first half: nothing recorded", len(records), 0)
+        check("first-half 0-0: candidate still waiting", "1.57" in s.get_candidates(), True)
+        with patch.object(ltd_module.betfair_client, "get_match_state",
+                          new=AsyncMock(return_value=ht_state(status="SecondHalfKickOff", minute=66))):
+            sig = await s.evaluate_halftime(make_market(market_id="1.57", draw_lay=2.5, in_play=True))
+            check("0-0 at 66': too late, no signal", sig, None)
+        with patch.object(ltd_module.betfair_client, "get_match_state",
+                          new=AsyncMock(return_value=ht_state(status="Unknown", minute=50))):
+            sig = await s.evaluate_halftime(make_market(market_id="1.57", draw_lay=2.5, in_play=True))
+            check("unrecognised status: no signal on the clock alone", sig, None)
+        with patch.object(ltd_module.betfair_client, "get_match_state",
+                          new=AsyncMock(return_value=ht_state(minute=47))):
+            sig = await s.evaluate_halftime(make_market(market_id="1.57", draw_lay=2.9, in_play=True))
+            check("then the interval: signal", sig is not None and sig.odds == 2.9, True)
+
+        print("feed statuses")
+        flags = lambda st: (st.is_first_half, st.is_half_time, st.is_second_half, st.first_half_is_over)
+        check("KickOff is the first half", flags(ht_state(status="KickOff", minute=47)), (True, False, False, False))
+        check("FirstHalfEnd is the interval", flags(ht_state()), (False, True, False, True))
+        check("SecondHalfKickOff is not half-time", flags(ht_state(status="SecondHalfKickOff", minute=46)),
+              (False, False, True, True))
+        check("Finished: first half over", flags(ht_state(status="Finished", minute=90)), (False, False, False, True))
+        engine_src = pathlib.Path("scripts/run_paper_trading.py").read_text()
+        check("funnel HT score is taken on is_half_time",
+              "row.ht_home is None and state.is_half_time" in engine_src, True)
 
         print("expiry")
         await s.evaluate(make_market(market_id="1.6", start_in_hours=-2.0))

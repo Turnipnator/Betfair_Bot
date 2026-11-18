@@ -377,7 +377,7 @@ class BetRepository:
 class EvaluationRepository:
     """Repository for the persisted strategy funnel (strategy_evaluations)."""
 
-    # Half-time can only be read while the feed says HalfTime, so HT rows are
+    # Half-time can only be read during the interval (FirstHalfEnd), so HT rows are
     # polled from 40 to 75 minutes after kick-off. Full-time from 95 minutes.
     HT_WINDOW_MINUTES = (40, 75)
     FT_AFTER_MINUTES = 95

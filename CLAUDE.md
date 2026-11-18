@@ -397,16 +397,28 @@ drawn either (`ltd_first_half_shots.py`, StatsBomb 2015/16, p > 0.2 on every
 cut). Break-even draw rate at 2% commission: 35.3% laying at 2.8, 31.8% at
 3.1, 30.8% at 3.2.
 
-**The entry is from the 40th minute, not the whistle.** The in-play feed's
-statuses are `KickOff` (the whole first half), `FirstHalfEnd` (the interval)
-and `SecondHalfKickOff`; `"HalfTime"`, which `evaluate_halftime` and
-`MatchState.is_half_time` test for, has never been sent. So the 40-65 minute
-window is what admits an entry, and 24 of the 34 funnel entries were made
-with status `KickOff` at 40-45', 12 of them at exactly 40'. That is why the
-fills (avg 3.04) sit above a fair price worked out for the interval (2.82):
-priced for the 40th minute the same model gives 3.05. Left as it is while on
-paper; `is_half_time` also counts the whole second half as half-time, so the
-funnel's `ht_*` score can pick up a goal scored just after the restart.
+**Until 17 Nov 2026 the entry was from the 40th minute, not the whistle.**
+The in-play feed's statuses are `KickOff` (the whole first half, stoppage
+time included), `FirstHalfEnd` (the interval) and `SecondHalfKickOff`;
+`"HalfTime"` and `"InProgress"`, which the code tested for, have never been
+sent. So the 40-65 minute clock window was what admitted an entry, and 24 of
+the 34 funnel entries were made with status `KickOff` at 40-45', 12 of them
+at exactly 40'. That is why those fills (avg 3.04) sit above a fair price
+worked out for the interval (2.82): priced for the 40th minute the same model
+gives 3.05.
+
+**Fixed the same day: the status decides, not the clock.** The clock reads
+46-49 in first-half stoppage time and restarts at 45 after the interval, so
+it cannot tell the halves apart. `MatchState` (`src/betfair/client.py`) now
+names the real statuses: `is_first_half`, `is_half_time` (the interval only;
+it used to be true for the whole second half), `is_second_half`,
+`first_half_is_over`. LTD enters in the interval, or in the second half up to
+`LATEST_ENTRY_MINUTE` (65), never in the first half. A goal reading is final
+only once `first_half_is_over` (it used to become final at 46' of first-half
+stoppage). The funnel's `ht_*` score is taken in the interval only; rows
+scored before this fix may carry a goal from early in the second half. Paper
+entries from 18 Nov are interval fills and are not comparable with the
+earlier 40th-minute ones. `tests/test_ltd_funnel.py`.
 
 **The price watch** places nothing. `_watch_ht_price` puts every tier 1/2 and
 UEFA fixture on a watch list at the pre-match scan, whatever LTD's verdict,

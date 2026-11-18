@@ -826,9 +826,9 @@ class PaperTradingEngine:
         """
         Fill half-time and full-time scores into the persisted strategy funnel.
 
-        Betfair's in-play feed has no history, so HT is only readable while
-        the status is HalfTime: rows are polled through the 40–75 minute
-        window and the score taken whenever the feed says so. FT is taken
+        Betfair's in-play feed has no history, so HT is only readable during
+        the interval (status FirstHalfEnd): rows are polled through the 40–75
+        minute window and the score taken while the feed says so. FT is taken
         once the feed says Finished; if that was missed, the football-data
         results file fills it in from three hours after kick-off.
         """

@@ -173,6 +173,8 @@ async def run():
 
     check("goal reading at 20': nothing", await s.observe_halftime_price(live, state(home=1, minute=20)), None)
     check("goal reading at 20': held, it may be disallowed", "1.1" in s._ht_watch, True)
+    check("goal reading at 47' of first-half stoppage: held",
+          (await s.observe_halftime_price(live, state(home=1, minute=47)), "1.1" in s._ht_watch), (None, True))
     check("1-0 in the interval: nothing",
           await s.observe_halftime_price(live, state(home=1, status="FirstHalfEnd", minute=45)), None)
     check("1-0 in the interval: watch dropped", "1.1" in s._ht_watch, False)

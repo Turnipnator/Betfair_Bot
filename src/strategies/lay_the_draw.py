@@ -63,6 +63,12 @@ MIN_MARKET_LIQUIDITY = 15_000  # £15k
 # relegated side (no prior season in its new division) until late September.
 MIN_TEAM_HOME_AWAY_GAMES = 3
 
+# The entry is made in the interval, or failing that in the second half up to
+# this minute. Until 17 Nov 2026 the test was "status HalfTime, or the clock
+# between 40 and 65"; the feed never sends "HalfTime", so the clock admitted
+# the bet from the 40th minute of the first half (24 of 34 entries).
+LATEST_ENTRY_MINUTE = 65
+
 # Half-time price watch (17 Nov 2026). Observation only: it places nothing.
 # The base-rate test could say how often a 0-0 game finishes drawn but not
 # what the exchange charges to lay it, because no history of in-play prices
@@ -76,10 +82,6 @@ MIN_TEAM_HOME_AWAY_GAMES = 3
 HT_WATCH_FROM_MINUTES = 39
 HT_WATCH_TO_MINUTES = 78
 HT_WATCH_FIRST_MINUTE = 40
-# What the in-play feed reports during the interval. "HalfTime" is what the
-# code was written against; the feed has only ever sent "FirstHalfEnd".
-HT_INTERVAL_STATUSES = ("FirstHalfEnd", "HalfTime")
-SECOND_HALF_STATUS = "SecondHalfKickOff"
 UEFA_WATCH_LEAGUE = "UEFA"
 
 
@@ -561,11 +563,15 @@ class LayTheDrawStrategy(BaseStrategy):
             )
             return None
 
-        # Must be around half-time or early second half (40-65 mins)
+        # The first half must be over: the interval, or the second half up to
+        # LATEST_ENTRY_MINUTE. Judged on the feed's status, not the clock,
+        # which reads 46-49 in first-half stoppage time and again after the
+        # restart.
         match_time = match_state.match_time
-        is_halftime = match_state.status == "HalfTime"
-
-        if not is_halftime and (match_time < 40 or match_time > 65):
+        entry_open = match_state.is_half_time or (
+            match_state.is_second_half and match_time <= LATEST_ENTRY_MINUTE
+        )
+        if not entry_open:
             return None
 
         # Find the draw runner and check current odds
@@ -646,16 +652,12 @@ class LayTheDrawStrategy(BaseStrategy):
         """
         Whether a non-0-0 reading can be trusted to drop a candidate.
 
-        True once the feed says half-time (or the second half has kicked
-        off), the clock is past 45 minutes, or the match has finished. A
-        reading taken in the first half, stoppage time included, is held
-        instead: the score at the whistle is the only one that matters.
+        True once the feed says the interval, the second half or full time.
+        A reading taken in the first half, stoppage time included, is held
+        instead: the score at the whistle is the only one that matters. The
+        clock is not consulted; it passes 45 in first-half stoppage time.
         """
-        return (
-            match_state.is_half_time
-            or match_state.is_finished
-            or match_state.match_time > 45
-        )
+        return match_state.first_half_is_over
 
     async def _watch_ht_price(self, market: Market) -> None:
         """
@@ -751,13 +753,13 @@ class LayTheDrawStrategy(BaseStrategy):
         if watch is None or match_state is None:
             return None
 
-        in_interval = match_state.status in HT_INTERVAL_STATUSES
-        second_half = match_state.status == SECOND_HALF_STATUS or match_state.is_finished
+        in_interval = match_state.is_half_time
+        second_half = match_state.is_second_half or match_state.is_finished
 
         if match_state.home_score != 0 or match_state.away_score != 0:
             # Same rule as the entry path: a first-half reading can be a
             # disallowed goal, so it only ends the watch once it is final.
-            if in_interval or second_half or match_state.match_time > 45:
+            if match_state.first_half_is_over:
                 del self._ht_watch[market.market_id]
             return None
 

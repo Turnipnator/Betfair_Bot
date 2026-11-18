@@ -29,6 +29,18 @@ from src.models import (
 )
 
 
+# What the in-play feed sends as `inPlayMatchStatus` for football. The code
+# was written against "InProgress" and "HalfTime", neither of which the feed
+# has ever sent (funnel rows, Sep-Nov 2026): the first half, stoppage time
+# included, is "KickOff"; the interval is "FirstHalfEnd"; the second half is
+# "SecondHalfKickOff". The clock is no substitute: it reads 46-49 in
+# first-half stoppage time and restarts at 45 for the second half.
+STATUS_FIRST_HALF = "KickOff"
+STATUS_INTERVAL = "FirstHalfEnd"
+STATUS_SECOND_HALF = "SecondHalfKickOff"
+STATUS_FINISHED = "Finished"
+
+
 @dataclass
 class MatchState:
     """Real-time match state from Betfair in-play service."""
@@ -37,19 +49,31 @@ class MatchState:
     match_time: int  # Actual match minutes elapsed
     home_score: int
     away_score: int
-    status: str  # "InProgress", "HalfTime", "SecondHalfKickOff", "Finished"
+    status: str  # One of the STATUS_* values above, or "Unknown"
+
+    @property
+    def is_first_half(self) -> bool:
+        return self.status == STATUS_FIRST_HALF
 
     @property
     def is_half_time(self) -> bool:
-        return self.status in ("HalfTime", "SecondHalfKickOff")
-
-    @property
-    def is_finished(self) -> bool:
-        return self.status == "Finished"
+        """The interval only. Until 17 Nov 2026 this was also true for the
+        whole second half, so a half-time score could include a later goal."""
+        return self.status == STATUS_INTERVAL
 
     @property
     def is_second_half(self) -> bool:
-        return self.match_time >= 45 or self.status == "SecondHalfKickOff"
+        return self.status == STATUS_SECOND_HALF
+
+    @property
+    def is_finished(self) -> bool:
+        return self.status == STATUS_FINISHED
+
+    @property
+    def first_half_is_over(self) -> bool:
+        """Whether the score now on the feed includes the final half-time
+        score: a first-half reading can still be a goal that is disallowed."""
+        return self.is_half_time or self.is_second_half or self.is_finished
 
     @property
     def score_diff(self) -> int:
